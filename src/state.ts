@@ -1,5 +1,6 @@
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
-import { mkdir, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
 
@@ -53,6 +54,59 @@ export const BROWSER_ARGS = [
   "--js-flags=--max-old-space-size=128",
 ];
 
+/**
+ * Saved login states live outside any repo by default (they contain live session cookies).
+ * Override with QA_STATE_DIR.
+ */
+export const STATE_DIR = process.env.QA_STATE_DIR ?? path.join(os.homedir(), ".qa-agent", "states");
+
+export function statePath(name: string): string {
+  if (!/^[A-Za-z0-9_.-]+$/.test(name) || name.startsWith(".")) {
+    throw new Error(`Invalid state name "${name}". Use letters, numbers, "_", "-" or "." only.`);
+  }
+  return path.join(STATE_DIR, `${name}.json`);
+}
+
+export interface StateInfo {
+  name: string;
+  savedAt: string;
+  ageMinutes: number;
+  cookies: number;
+  domains: string[];
+  origins: string[];
+}
+
+export async function listStates(): Promise<StateInfo[]> {
+  let files: string[];
+  try {
+    files = (await readdir(STATE_DIR)).filter((f) => f.endsWith(".json"));
+  } catch {
+    return [];
+  }
+  const out: StateInfo[] = [];
+  for (const f of files.sort()) {
+    const file = path.join(STATE_DIR, f);
+    try {
+      const st = await stat(file);
+      const json = JSON.parse(await readFile(file, "utf8")) as {
+        cookies?: { domain: string }[];
+        origins?: { origin: string }[];
+      };
+      out.push({
+        name: f.replace(/\.json$/, ""),
+        savedAt: st.mtime.toISOString(),
+        ageMinutes: Math.round((Date.now() - st.mtimeMs) / 60_000),
+        cookies: json.cookies?.length ?? 0,
+        domains: [...new Set((json.cookies ?? []).map((c) => c.domain))],
+        origins: (json.origins ?? []).map((o) => o.origin),
+      });
+    } catch {
+      // unreadable/corrupt file: skip it
+    }
+  }
+  return out;
+}
+
 export function slugify(name: string): string {
   const slug = name
     .toLowerCase()
@@ -64,6 +118,8 @@ export function slugify(name: string): string {
 
 export class QASession {
   testName: string;
+  /** Name of the saved login state this session started from, if any. */
+  loadedState?: string;
   dir: string;
   startedAt: Date;
   steps: StepResult[] = [];
@@ -117,8 +173,13 @@ export class QASession {
   static async start(
     testName: string,
     evidenceRoot: string,
-    httpCredentials?: { username: string; password: string },
+    opts: {
+      httpCredentials?: { username: string; password: string };
+      storageStatePath?: string;
+      loadedState?: string;
+    } = {},
   ): Promise<QASession> {
+    const { httpCredentials, storageStatePath, loadedState } = opts;
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
     const dir = path.resolve(evidenceRoot, `${slugify(testName)}-${timestamp}`);
     await mkdir(dir, { recursive: true });
@@ -133,11 +194,14 @@ export class QASession {
         const context = await browser.newContext({
           viewport: { width: 1280, height: 800 },
           ...(httpCredentials ? { httpCredentials } : {}),
+          ...(storageStatePath ? { storageState: storageStatePath } : {}),
         });
         const page = await context.newPage();
         page.setDefaultTimeout(num(process.env.QA_TIMEOUT_MS, 10_000));
         page.setDefaultNavigationTimeout(num(process.env.QA_NAV_TIMEOUT_MS, 30_000));
-        return new QASession(testName, dir, browser, context, page);
+        const session = new QASession(testName, dir, browser, context, page);
+        session.loadedState = loadedState;
+        return session;
       } catch (err) {
         lastErr = err;
         await browser?.close().catch(() => {});
@@ -150,6 +214,14 @@ export class QASession {
   /** API client sharing cookies and Basic Auth credentials with the browser context. */
   get request() {
     return this.context.request;
+  }
+
+  /** Saves cookies, localStorage and IndexedDB so a later session can start already logged in. */
+  async saveState(file: string): Promise<{ cookies: number; origins: number }> {
+    await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+    const st = await this.context.storageState({ path: file, indexedDB: true });
+    await chmod(file, 0o600);
+    return { cookies: st.cookies.length, origins: st.origins.length };
   }
 
   mask(text: string): string {

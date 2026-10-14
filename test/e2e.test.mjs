@@ -3,7 +3,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { existsSync, readFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, statSync, readFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -58,6 +58,19 @@ before(async () => {
       });
       return;
     }
+    if (req.url === "/me") {
+      const authed = /(?:^|;\s*)sid=cookie-secret-9/.test(req.headers.cookie ?? "");
+      res.writeHead(authed ? 200 : 401, { "Content-Type": "text/html" }).end(authed ? "<h1>Hello session</h1>" : "<h1>Please log in</h1>");
+      return;
+    }
+    if (req.url === "/ls-set") {
+      res.writeHead(200, { "Content-Type": "text/html" }).end('<p>set</p><script>localStorage.setItem("token","ls-token-77")</script>');
+      return;
+    }
+    if (req.url === "/ls-read") {
+      res.writeHead(200, { "Content-Type": "text/html" }).end('<p id="v"></p><script>document.getElementById("v").textContent="ls="+(localStorage.getItem("token")||"none")</script>');
+      return;
+    }
     if (req.url === "/protected") {
       const ok = req.headers.authorization === "Basic " + Buffer.from("alice:s3cret").toString("base64");
       if (!ok) {
@@ -82,7 +95,7 @@ before(async () => {
     new StdioClientTransport({
       command: "node",
       args: [path.join(root, "dist", "server.js")],
-      env: { ...process.env, QA_EVIDENCE_DIR: evidence, QA_TEST_PASS: "s3cret", QA_ASSERT_TIMEOUT_MS: "1500", QA_TIMEOUT_MS: "2000" },
+      env: { ...process.env, QA_EVIDENCE_DIR: evidence, QA_STATE_DIR: path.join(evidence, "states"), QA_TEST_PASS: "s3cret", QA_ASSERT_TIMEOUT_MS: "1500", QA_TIMEOUT_MS: "2000" },
     }),
   );
 });
@@ -111,8 +124,10 @@ test("lists all tools", async () => {
     "qa_extract",
     "qa_finish_session",
     "qa_inspect_dom",
+    "qa_list_states",
     "qa_navigate",
     "qa_request",
+    "qa_save_state",
     "qa_start_session",
   ]);
 });
@@ -385,4 +400,67 @@ test("qa_extract: read page values into variables and reuse them", { timeout: 60
   assert.ok(!sec.text.includes("pw-value-123"), "sensitive extract masked in output");
   const fin = await call("qa_finish_session", {});
   assert.ok(!readFileSync(fin.json.report, "utf8").includes("pw-value-123"), "sensitive extract masked in report");
+});
+
+test("saved login state: save once, reuse in later sessions", { timeout: 90_000 }, async () => {
+  assert.deepEqual((await call("qa_list_states")).json.states, [], "no states yet");
+
+  // Session A: log in (HttpOnly-style cookie via API + localStorage via page), then save.
+  await call("qa_start_session", { test_name: "login once" });
+  await call("qa_navigate", { url: `${baseUrl}/me`, step_description: "anonymous first" });
+  assert.equal((await call("qa_assert", { type: "text_present", expected: "Please log in", step_description: "logged out" })).json.status, "pass");
+  assert.equal((await call("qa_request", { method: "POST", url: "/api/login", body: { username: "ana" }, step_description: "login" })).isError, false);
+  await call("qa_navigate", { url: `${baseUrl}/ls-set`, step_description: "set localStorage" });
+  const saved = await call("qa_save_state", { name: "dev-admin" });
+  assert.equal(saved.isError, false, saved.text);
+  assert.match(saved.json.detail, /Saved state "dev-admin" \(\d+ cookies/);
+  const file = path.join(evidence, "states", "dev-admin.json");
+  assert.ok(existsSync(file), "state file written outside the run folder");
+  assert.equal((statSync(file).mode & 0o777).toString(8), "600", "state file is private");
+  assert.ok(!file.startsWith(JSON.parse((await call("qa_finish_session", {})).text).report.replace(/README\.md$/, "")), "not in evidence dir");
+
+  const list = (await call("qa_list_states")).json.states;
+  assert.equal(list.length, 1);
+  assert.equal(list[0].name, "dev-admin");
+  assert.ok(list[0].cookies >= 1);
+  assert.ok(list[0].origins.some((o) => o.startsWith("http://127.0.0.1")));
+
+  // Session B: loads state -> already logged in, localStorage restored, no login steps.
+  const b = await call("qa_start_session", { test_name: "reuse", load_state: "dev-admin" });
+  assert.equal(b.json.loaded_state, "dev-admin");
+  await call("qa_navigate", { url: `${baseUrl}/me`, step_description: "open /me" });
+  assert.equal((await call("qa_assert", { type: "text_present", expected: "Hello session", step_description: "logged in" })).json.status, "pass");
+  await call("qa_navigate", { url: `${baseUrl}/ls-read`, step_description: "read localStorage" });
+  assert.equal((await call("qa_assert", { type: "text_present", expected: "ls=ls-token-77", step_description: "storage restored" })).json.status, "pass");
+  // API calls share the loaded cookies too
+  assert.equal((await call("qa_request", { method: "GET", url: "/me", expect_body_contains: "Hello session", step_description: "api sees cookie" })).isError, false);
+  const fin = await call("qa_finish_session", {});
+  assert.equal(fin.json.result, "PASS");
+  const readme = readFileSync(fin.json.report, "utf8");
+  assert.match(readme, /Login state:\*\* loaded `dev-admin`/);
+  assert.ok(!readme.includes("cookie-secret-9"));
+
+  // Session C: no state -> anonymous again (states are opt-in and isolated).
+  await call("qa_start_session", { test_name: "anonymous" });
+  await call("qa_navigate", { url: `${baseUrl}/me`, step_description: "open /me" });
+  assert.equal((await call("qa_assert", { type: "text_present", expected: "Please log in", step_description: "still anonymous" })).json.status, "pass");
+  await call("qa_finish_session", {});
+});
+
+test("saved login state: errors are clear and do not kill a running session", { timeout: 60_000 }, async () => {
+  await call("qa_start_session", { test_name: "running" });
+  await call("qa_navigate", { url: `${baseUrl}/form`, step_description: "open" });
+
+  const missing = await call("qa_start_session", { test_name: "x", load_state: "nope" });
+  assert.equal(missing.isError, true);
+  assert.match(missing.text, /"nope" not found\. Available: dev-admin/);
+  const bad = await call("qa_start_session", { test_name: "x", load_state: "../etc/passwd" });
+  assert.equal(bad.isError, true);
+  assert.match(bad.text, /Invalid state name/);
+  assert.equal((await call("qa_save_state", { name: "../evil" })).isError, true);
+
+  // The original session survived both failed starts.
+  const still = await call("qa_assert", { type: "text_present", expected: "Fixture Form", step_description: "still alive" });
+  assert.equal(still.json.status, "pass");
+  await call("qa_finish_session", {});
 });

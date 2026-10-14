@@ -39,6 +39,7 @@ export async function writeReport(session: QASession, summaryNotes?: string): Pr
   const lines: string[] = [];
   lines.push(`# QA Report: ${session.testName}`, "");
   lines.push(`**Result:** ${overall === "PASS" ? "✅ PASS" : "❌ FAIL"}  `);
+  if (session.loadedState) lines.push(`**Login state:** loaded \`${session.loadedState}\` (saved login, no manual login steps)  `);
   lines.push(`**Started:** ${session.startedAt.toISOString()}  `);
   lines.push(`**Finished:** ${finishedAt.toISOString()}  `);
   lines.push(`**Steps:** ${steps.length} (${passed} passed, ${failed.length} failed)  `);

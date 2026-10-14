@@ -63,6 +63,21 @@ claude mcp add qa-agent -s user \
 - For the app's own login form, use `{{env:NAME}}` placeholders in `qa_action` values, e.g. `fill #password` with `{{env:QA_APP_PASS}}`. The report records only "Filled #password", never the value.
 - Screenshots still show non-masked fields, so use a dedicated test account and keep `evidence/` out of git.
 
+## Saved login (log in once, reuse everywhere)
+
+Logging in through the UI on every run is slow and flaky. Do it once, save it, and start later sessions already logged in:
+
+1. Run a session that logs in (UI steps, or `qa_request` to a login API), then call `qa_save_state` with a name such as `dev-admin`.
+2. Start any later session with `qa_start_session` `load_state: "dev-admin"`. Cookies, localStorage and IndexedDB are restored, and API calls from `qa_request` use the same login.
+3. `qa_list_states` shows what's saved, how old it is and which domains it covers. If the site has logged you out (expired session), log in again and re-save with the same name.
+
+Example prompt: "Log in to https://dev.example.com as the test user and save the login as dev-admin", then later "using the dev-admin login, open /orders and check the table has 5 rows".
+
+Notes:
+- **Basic Auth is not part of the state.** Pass it each time (or set `QA_BASIC_AUTH_USER` / `QA_BASIC_AUTH_PASS`).
+- **A state file is a live session.** Anyone holding the file can act as that user. Files are written with mode 600 to `~/.qa-agent/states/`, outside any repo and outside the evidence folder, so they don't end up in reports or git. Use a dedicated test account and delete a state by removing its file.
+- The report header shows `Login state: loaded <name>` so you can see a run didn't log in itself.
+
 ## API testing and multi-step flows
 
 `qa_request` calls your API from the same session as the browser (same cookies, same Basic Auth), so a flow can mix API and UI steps: create data over the API, verify it in the UI, then clean up.
@@ -118,9 +133,11 @@ Or drive it ad hoc:
 
 | Tool | Purpose |
 |------|---------|
-| `qa_start_session(test_name)` | Creates `evidence/<name>-<timestamp>/`, launches the browser, resets the step counter |
+| `qa_start_session(test_name, load_state?, basic_auth_*?)` | Creates `evidence/<name>-<timestamp>/`, launches the browser, resets the step counter. `load_state` starts already logged in |
 | `qa_navigate(url, step_description)` | Goes to a URL (waits for `domcontentloaded`), screenshots it |
 | `qa_action(action, selector, value?, step_description)` | `click`, `dblclick`, `hover`, `scroll`, `check`, `uncheck`, `fill`, `press`, `select`, `upload` on a selector, then screenshots |
+| `qa_save_state(name)` | Saves the current login (cookies, localStorage, IndexedDB) under a name for later sessions |
+| `qa_list_states()` | Lists saved logins with age, cookie count and domains |
 | `qa_extract(source, selector?, save_as, ...)` | Reads text, input value, attribute, element count, URL or title from the page (optionally through a regex) and saves it as `{{var:NAME}}` |
 | `qa_request(method, url, headers?, body?, expect_*?, save?, ...)` | HTTP API call sharing the browser's cookies and Basic Auth; asserts status/body/JSON, saves response fields as variables, and is recorded in the report |
 | `qa_inspect_dom()` | Returns the accessibility tree plus interactive elements, for fixing broken selectors |
@@ -145,6 +162,7 @@ A failed action or assertion is recorded as a FAIL step. The tool returns an err
 | `QA_NAV_TIMEOUT_MS` | `30000` | Navigation timeout |
 | `QA_ASSERT_TIMEOUT_MS` | `5000` | How long assertions wait for text/elements |
 | `QA_BASIC_AUTH_USER` / `QA_BASIC_AUTH_PASS` | unset | HTTP Basic Auth for every session |
+| `QA_STATE_DIR` | `~/.qa-agent/states` | Where saved login states are stored |
 
 The browser is launched headless with `--disable-gpu --no-sandbox --disable-dev-shm-usage --js-flags=--max-old-space-size=128`.
 

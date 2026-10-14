@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import path from "node:path";
+import { existsSync } from "node:fs";
 import { writeReport } from "./reporter.js";
 import {
   QASession,
@@ -11,6 +12,9 @@ import {
   setSession,
   ASSERT_TIMEOUT_MS,
   REQUEST_TIMEOUT_MS,
+  STATE_DIR,
+  listStates,
+  statePath,
   type ApiRecord,
   type StepResult,
 } from "./state.js";
@@ -150,27 +154,94 @@ server.registerTool(
         .string()
         .optional()
         .describe("HTTP Basic Auth password (supports {{env:NAME}}). Falls back to QA_BASIC_AUTH_PASS."),
+      load_state: z
+        .string()
+        .optional()
+        .describe("Start already logged in by loading a state saved earlier with qa_save_state (see qa_list_states)."),
     },
   },
-  async ({ test_name, basic_auth_username, basic_auth_password }) => {
+  async ({ test_name, basic_auth_username, basic_auth_password, load_state }) => {
     try {
+      const user = basic_auth_username ? resolve(basic_auth_username) : process.env.QA_BASIC_AUTH_USER;
+      const pass = basic_auth_password ? resolve(basic_auth_password) : process.env.QA_BASIC_AUTH_PASS;
+      const creds = user && pass ? { username: user, password: pass } : undefined;
+      let storageStatePath: string | undefined;
+      if (load_state) {
+        storageStatePath = statePath(load_state);
+        if (!existsSync(storageStatePath)) {
+          const known = (await listStates()).map((x) => x.name);
+          throw new Error(
+            `Saved state "${load_state}" not found. ${known.length ? `Available: ${known.join(", ")}.` : "No states saved yet."} ` +
+              `Log in once, then call qa_save_state.`,
+          );
+        }
+      }
+      // Validate everything first so a bad argument doesn't kill the running session.
       const previous = getSession();
       if (previous) {
         await previous.close();
         setSession(null);
       }
-      const user = basic_auth_username ? resolve(basic_auth_username) : process.env.QA_BASIC_AUTH_USER;
-      const pass = basic_auth_password ? resolve(basic_auth_password) : process.env.QA_BASIC_AUTH_PASS;
-      const creds = user && pass ? { username: user, password: pass } : undefined;
-      const session = await QASession.start(test_name, EVIDENCE_ROOT, creds);
+      const session = await QASession.start(test_name, EVIDENCE_ROOT, {
+        httpCredentials: creds,
+        storageStatePath,
+        loadedState: load_state,
+      });
       if (creds) {
         session.secrets.add(creds.username);
         session.secrets.add(creds.password);
       }
       setSession(session);
       return text(
-        JSON.stringify({ status: "started", test_name, evidence_dir: session.dir, basic_auth: Boolean(creds) }, null, 2),
+        JSON.stringify({ status: "started", test_name, evidence_dir: session.dir, basic_auth: Boolean(creds), loaded_state: load_state ?? null }, null, 2),
       );
+    } catch (err) {
+      return fromError(err);
+    }
+  },
+);
+
+server.registerTool(
+  "qa_save_state",
+  {
+    description:
+      "Save the browser's login state (cookies, localStorage, IndexedDB) under a name so later sessions can skip logging in via qa_start_session `load_state`. " +
+      `Stored outside the evidence folder in ${STATE_DIR} (file mode 600) because it holds live session cookies. Call it after a successful login.`,
+    inputSchema: {
+      name: z.string().min(1).describe("e.g. 'dev-admin'. Letters, numbers, _ - . only. Overwrites an existing state with the same name."),
+      step_description: z.string().optional(),
+    },
+  },
+  async ({ name, step_description }) => {
+    try {
+      const file = statePath(name);
+      const s = requireSession();
+      const r = await s.runStep(
+        "save_state",
+        step_description ?? `Save login state "${name}"`,
+        async () => {
+          const { cookies, origins } = await s.saveState(file);
+          return `Saved state "${name}" (${cookies} cookies, ${origins} origins with storage). Load it with qa_start_session load_state "${name}".`;
+        },
+        { evidence: false },
+      );
+      return stepResponse(r, s.dir);
+    } catch (err) {
+      return fromError(err);
+    }
+  },
+);
+
+server.registerTool(
+  "qa_list_states",
+  {
+    description:
+      "List saved login states with age, cookie count and the domains/origins they cover, so you can check one is still fresh before loading it. Does not need a session.",
+    inputSchema: {},
+  },
+  async () => {
+    try {
+      return text(JSON.stringify({ state_dir: STATE_DIR, states: await listStates() }, null, 2));
     } catch (err) {
       return fromError(err);
     }
