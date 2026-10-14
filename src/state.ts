@@ -58,7 +58,11 @@ export class QASession {
     this.page = page;
   }
 
-  static async start(testName: string, evidenceRoot: string): Promise<QASession> {
+  static async start(
+    testName: string,
+    evidenceRoot: string,
+    httpCredentials?: { username: string; password: string },
+  ): Promise<QASession> {
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
     const dir = path.resolve(evidenceRoot, `${slugify(testName)}-${timestamp}`);
     await mkdir(dir, { recursive: true });
@@ -70,7 +74,10 @@ export class QASession {
       let browser: Browser | null = null;
       try {
         browser = await chromium.launch({ headless: true, args: BROWSER_ARGS, ...(ch ? { channel: ch } : {}) });
-        const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+        const context = await browser.newContext({
+          viewport: { width: 1280, height: 800 },
+          ...(httpCredentials ? { httpCredentials } : {}),
+        });
         const page = await context.newPage();
         page.setDefaultTimeout(10_000);
         page.setDefaultNavigationTimeout(30_000);

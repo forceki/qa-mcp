@@ -47,6 +47,22 @@ claude mcp list        # qa-agent ... ✔ Connected
 
 Prefer editing config by hand? Use `claude_desktop_config.json` in this repo as a template, and change the paths to your own.
 
+## Basic auth + login pages (dev/staging sites)
+
+Sites behind HTTP Basic Auth (the browser popup) are handled at session start. Keep secrets in env vars, not in chat or specs:
+
+```bash
+claude mcp add qa-agent -s user \
+  -e QA_EVIDENCE_DIR="$PWD/evidence" \
+  -e QA_BASIC_AUTH_USER=devuser -e QA_BASIC_AUTH_PASS=devpass \
+  -e QA_APP_USER=tester@example.com -e QA_APP_PASS=app-password \
+  -- node "$PWD/dist/server.js"
+```
+
+- `qa_start_session` uses `QA_BASIC_AUTH_USER` / `QA_BASIC_AUTH_PASS` automatically, or accepts `basic_auth_username` / `basic_auth_password` (which may be `{{env:NAME}}`).
+- For the app's own login form, use `{{env:NAME}}` placeholders in `qa_action` values, e.g. `fill #password` with `{{env:QA_APP_PASS}}`. The report records only "Filled #password", never the value.
+- Screenshots still show non-masked fields, so use a dedicated test account and keep `evidence/` out of git.
+
 ## Usage
 
 Ask Claude in plain language:

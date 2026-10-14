@@ -19,6 +19,15 @@ const server = new McpServer({ name: "qa-agent", version: "1.0.0" });
 
 type ToolResult = { content: { type: "text"; text: string }[]; isError?: boolean };
 
+/** Replaces {{env:NAME}} with process.env.NAME so secrets never need to appear in chat or specs. */
+function resolveEnv(value: string): string {
+  return value.replace(/\{\{env:([A-Za-z0-9_]+)\}\}/g, (_, name: string) => {
+    const v = process.env[name];
+    if (v === undefined) throw new Error(`Environment variable ${name} is not set.`);
+    return v;
+  });
+}
+
 const text = (t: string, isError = false): ToolResult => ({
   content: [{ type: "text", text: t }],
   ...(isError ? { isError: true } : {}),
@@ -46,18 +55,33 @@ server.registerTool(
   {
     description:
       "Start a QA run: creates ./evidence/<test-name>-<timestamp>/, launches Chromium, resets the step counter. Any previous unfinished session is closed.",
-    inputSchema: { test_name: z.string().min(1).describe("Human-readable test name") },
+    inputSchema: {
+      test_name: z.string().min(1).describe("Human-readable test name"),
+      basic_auth_username: z
+        .string()
+        .optional()
+        .describe("HTTP Basic Auth username (supports {{env:NAME}}). Falls back to QA_BASIC_AUTH_USER."),
+      basic_auth_password: z
+        .string()
+        .optional()
+        .describe("HTTP Basic Auth password (supports {{env:NAME}}). Falls back to QA_BASIC_AUTH_PASS."),
+    },
   },
-  async ({ test_name }) => {
+  async ({ test_name, basic_auth_username, basic_auth_password }) => {
     try {
       const previous = getSession();
       if (previous) {
         await previous.close();
         setSession(null);
       }
-      const session = await QASession.start(test_name, EVIDENCE_ROOT);
+      const user = basic_auth_username ? resolveEnv(basic_auth_username) : process.env.QA_BASIC_AUTH_USER;
+      const pass = basic_auth_password ? resolveEnv(basic_auth_password) : process.env.QA_BASIC_AUTH_PASS;
+      const creds = user && pass ? { username: user, password: pass } : undefined;
+      const session = await QASession.start(test_name, EVIDENCE_ROOT, creds);
       setSession(session);
-      return text(JSON.stringify({ status: "started", test_name, evidence_dir: session.dir }, null, 2));
+      return text(
+        JSON.stringify({ status: "started", test_name, evidence_dir: session.dir, basic_auth: Boolean(creds) }, null, 2),
+      );
     } catch (err) {
       return fromError(err);
     }
@@ -109,11 +133,12 @@ server.registerTool(
           return `Clicked ${selector}`;
         }
         if (value === undefined) throw new Error(`"value" is required for action "${action}".`);
+        const resolved = resolveEnv(value);
         if (action === "fill") {
-          await loc.fill(value);
+          await loc.fill(resolved);
           return `Filled ${selector}`;
         }
-        await loc.press(value);
+        await loc.press(resolved);
         return `Pressed "${value}" on ${selector}`;
       });
       return stepResponse(r, s.dir);
