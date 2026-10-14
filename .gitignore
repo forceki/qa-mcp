@@ -3,3 +3,4 @@ dist/
 evidence/
 *.log
 .DS_Store
+dist-test/

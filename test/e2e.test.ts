@@ -3,6 +3,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
+import type { AddressInfo } from "node:net";
 import { existsSync, statSync, readFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -30,60 +31,64 @@ const FORM = `<!doctype html><html><head><title>Fixture</title></head><body>
 <div style="height:3000px"></div><footer id="bottom">The end</footer>
 </body></html>`;
 
-let httpServer, baseUrl, evidence, client;
+let httpServer: http.Server;
+let baseUrl: string;
+let evidence: string;
+let client: Client;
 
 before(async () => {
-  const items = new Map();
+  const items = new Map<string, Record<string, unknown>>();
   httpServer = http.createServer((req, res) => {
-    if (req.url.startsWith("/api/")) {
+    const url = req.url ?? "";
+    if (url.startsWith("/api/")) {
       let raw = "";
-      req.on("data", (c) => (raw += c));
+      req.on("data", (c: Buffer) => (raw += c));
       req.on("end", () => {
-        const send = (code, obj, extra = {}) =>
+        const send = (code: number, obj: unknown, extra: Record<string, string> = {}) =>
           res.writeHead(code, { "Content-Type": "application/json", ...extra }).end(JSON.stringify(obj));
-        const body = raw ? JSON.parse(raw) : {};
-        if (req.method === "POST" && req.url === "/api/login")
+        const body: Record<string, unknown> = raw ? JSON.parse(raw) : {};
+        if (req.method === "POST" && url === "/api/login")
           return send(200, { token: "tok-secret-123", user: { id: 7, name: "ana" } }, { "Set-Cookie": "sid=cookie-secret-9; Path=/" });
-        if (req.method === "POST" && req.url === "/api/items") {
+        if (req.method === "POST" && url === "/api/items") {
           const id = String(items.size + 100);
           items.set(id, { id, ...body });
           return send(201, { data: { id, ...body } });
         }
-        const m = req.url.match(/^\/api\/items\/(\d+)$/);
+        const m = url.match(/^\/api\/items\/(\d+)$/);
         if (m && req.method === "GET") return items.has(m[1]) ? send(200, items.get(m[1])) : send(404, { error: "not found" });
         if (m && req.method === "DELETE") return items.delete(m[1]) ? send(204, {}) : send(404, { error: "not found" });
-        if (req.url === "/api/echo") return send(200, { echoed: raw });
-        if (req.url === "/api/echo-auth") return send(200, { auth: req.headers.authorization ?? null });
+        if (url === "/api/echo") return send(200, { echoed: raw });
+        if (url === "/api/echo-auth") return send(200, { auth: req.headers.authorization ?? null });
         return send(404, { error: "no route" });
       });
       return;
     }
-    const html = (body) => res.writeHead(200, { "Content-Type": "text/html" }).end(`<!doctype html><title>t</title>${body}`);
-    if (req.url === "/tabs")
+    const html = (body: string) => res.writeHead(200, { "Content-Type": "text/html" }).end(`<!doctype html><title>t</title>${body}`);
+    if (url === "/tabs")
       return html('<h1>Tabs Home</h1><a id="blank" href="/popup" target="_blank">Open popup</a><button id="winopen" onclick="window.open(\'/popup2\')">window.open</button>');
-    if (req.url === "/frames") return html('<h1>Frames</h1><p id="r"></p><iframe src="/frame-inner" title="inner"></iframe>');
-    if (req.url === "/frame-inner") return html("<button onclick=\"parent.document.getElementById('r').textContent='framed-click'\">In frame</button>");
-    if (req.url === "/popup") return html("<h1>Popup One</h1>");
-    if (req.url === "/popup2") return html('<h1>Popup Two</h1><button id="closeme" onclick="window.close()">close me</button>');
-    if (req.url === "/dialogs")
+    if (url === "/frames") return html('<h1>Frames</h1><p id="r"></p><iframe src="/frame-inner" title="inner"></iframe>');
+    if (url === "/frame-inner") return html("<button onclick=\"parent.document.getElementById('r').textContent='framed-click'\">In frame</button>");
+    if (url === "/popup") return html("<h1>Popup One</h1>");
+    if (url === "/popup2") return html('<h1>Popup Two</h1><button id="closeme" onclick="window.close()">close me</button>');
+    if (url === "/dialogs")
       return html(`<h1>Dialogs</h1><p id="r"></p>
         <button id="alert" onclick="alert('Heads up')">alert</button>
         <button id="confirm" onclick="document.getElementById('r').textContent = confirm('Delete item?') ? 'deleted' : 'kept'">confirm</button>
         <button id="prompt" onclick="document.getElementById('r').textContent = 'hi ' + prompt('Your name?', 'anon')">prompt</button>`);
-    if (req.url === "/me") {
+    if (url === "/me") {
       const authed = /(?:^|;\s*)sid=cookie-secret-9/.test(req.headers.cookie ?? "");
       res.writeHead(authed ? 200 : 401, { "Content-Type": "text/html" }).end(authed ? "<h1>Hello session</h1>" : "<h1>Please log in</h1>");
       return;
     }
-    if (req.url === "/ls-set") {
+    if (url === "/ls-set") {
       res.writeHead(200, { "Content-Type": "text/html" }).end('<p>set</p><script>localStorage.setItem("token","ls-token-77")</script>');
       return;
     }
-    if (req.url === "/ls-read") {
+    if (url === "/ls-read") {
       res.writeHead(200, { "Content-Type": "text/html" }).end('<p id="v"></p><script>document.getElementById("v").textContent="ls="+(localStorage.getItem("token")||"none")</script>');
       return;
     }
-    if (req.url === "/protected") {
+    if (url === "/protected") {
       const ok = req.headers.authorization === "Basic " + Buffer.from("alice:s3cret").toString("base64");
       if (!ok) {
         res.writeHead(401, { "WWW-Authenticate": 'Basic realm="dev"' }).end("denied");
@@ -92,14 +97,14 @@ before(async () => {
       res.writeHead(200, { "Content-Type": "text/html" }).end("<h1>Welcome alice</h1>");
       return;
     }
-    if (req.url === "/form") {
+    if (url === "/form") {
       res.writeHead(200, { "Content-Type": "text/html" }).end(FORM);
       return;
     }
     res.writeHead(404).end("nope");
   });
-  await new Promise((r) => httpServer.listen(0, "127.0.0.1", r));
-  baseUrl = `http://127.0.0.1:${httpServer.address().port}`;
+  await new Promise<void>((r) => httpServer.listen(0, "127.0.0.1", r));
+  baseUrl = `http://127.0.0.1:${(httpServer.address() as AddressInfo).port}`;
 
   evidence = mkdtempSync(path.join(tmpdir(), "qa-evidence-"));
   client = new Client({ name: "test", version: "1" });
@@ -114,18 +119,85 @@ before(async () => {
 
 after(async () => {
   await client?.close();
-  await new Promise((r) => httpServer?.close(r));
+  await new Promise<void>((r) => (httpServer ? httpServer.close(() => r()) : r()));
   if (evidence) rmSync(evidence, { recursive: true, force: true });
 });
 
-async function call(name, args = {}) {
+interface ApiJson {
+  method: string;
+  url: string;
+  status: number;
+  response_body: string;
+  saved_variables: string[];
+}
+
+interface StateJson {
+  name: string;
+  cookies: number;
+  origins: string[];
+}
+
+interface TabJson {
+  index: number;
+  current: boolean;
+  url: string;
+  title: string;
+}
+
+/**
+ * Parsed JSON returned by the qa_* tools. Which fields exist depends on the tool that answered; they are typed as
+ * present so the tests stay readable, while the compiler still rejects misspelled field names.
+ */
+interface Json {
+  // step results
+  step: number;
+  status: "pass" | "fail";
+  durationMs: number;
+  url: string;
+  screenshot: string | null;
+  detail: string;
+  error: string;
+  hint: string;
+  new_tab: string;
+  dialogs: string[];
+  browser_issues: string[];
+  diagnostics: { console: string; aria: string };
+  api: ApiJson;
+  // qa_start_session
+  evidence_dir: string;
+  basic_auth: boolean;
+  loaded_state: string | null;
+  // qa_finish_session
+  result: "PASS" | "FAIL";
+  steps: number;
+  failed: number;
+  report: string;
+  // qa_list_states, qa_tab list
+  states: StateJson[];
+  tabs: TabJson[];
+  // qa_inspect_dom
+  interactive_elements: { selector: string }[];
+  aria_snapshot: string;
+}
+
+type Args = Record<string, unknown>;
+
+/** Raw text of a tool response (for non-JSON tools like qa_snapshot). */
+async function raw(name: string, args: Args = {}): Promise<string> {
   const r = await client.callTool({ name, arguments: args });
-  const t = r.content[0].text;
-  let json;
+  return (r.content as { text: string }[])[0].text;
+}
+
+async function call(name: string, args: Args = {}): Promise<{ isError: boolean; text: string; json: Json }> {
+  const r = await client.callTool({ name, arguments: args });
+  const t = (r.content as { text: string }[])[0].text;
+  let json: unknown;
   try {
     json = JSON.parse(t);
-  } catch {}
-  return { isError: Boolean(r.isError), text: t, json };
+  } catch {
+    // non-JSON response (plain error text)
+  }
+  return { isError: Boolean(r.isError), text: t, json: json as Json };
 }
 
 test("lists all tools", async () => {
@@ -158,7 +230,7 @@ test("full flow: every action and assertion type, report, screenshots", { timeou
   assert.equal(start.isError, false);
   const dir = start.json.evidence_dir;
 
-  const ok = async (name, args) => {
+  const ok = async (name: string, args: Args) => {
     const r = await call(name, args);
     assert.equal(r.isError, false, `${name} ${JSON.stringify(args)} -> ${r.text}`);
     assert.equal(r.json.status, "pass");
@@ -372,7 +444,7 @@ test("Basic auth is shared with qa_request", { timeout: 60_000 }, async () => {
 test("qa_extract: read page values into variables and reuse them", { timeout: 60_000 }, async () => {
   await call("qa_start_session", { test_name: "extract" });
   await call("qa_navigate", { url: `${baseUrl}/form`, step_description: "open" });
-  const ok = async (args) => {
+  const ok = async (args: Args) => {
     const r = await call("qa_extract", { step_description: "extract", ...args });
     assert.equal(r.isError, false, JSON.stringify(args) + " -> " + r.text);
     return r.json;
@@ -397,13 +469,14 @@ test("qa_extract: read page values into variables and reuse them", { timeout: 60
   assert.equal((await ok({ source: "value", selector: "#name", save_as: "check" })).detail, 'Extracted value of #name -> {{var:check}} = "Fixture Form!"');
 
   // Failure paths
-  for (const [args, re] of [
+  const failures: [Args, RegExp][] = [
     [{ source: "text", selector: "#nope", save_as: "x" }, /Timeout/],
     [{ source: "text", selector: "h1", regex: "zzz(\\d+)", save_as: "x" }, /did not match/],
     [{ source: "attribute", selector: "#name", save_as: "x" }, /"attribute" is required/],
     [{ source: "attribute", selector: "#name", attribute: "data-none", save_as: "x" }, /not found/],
     [{ source: "text", save_as: "x" }, /"selector" is required/],
-  ]) {
+  ];
+  for (const [args, re] of failures) {
     const r = await call("qa_extract", { step_description: "bad", ...args });
     assert.equal(r.isError, true, JSON.stringify(args));
     assert.match(r.json.error, re);
@@ -483,7 +556,7 @@ test("saved login state: errors are clear and do not kill a running session", { 
 test("tabs: popups auto-switch, list/switch/close/new, self-closing tab", { timeout: 90_000 }, async () => {
   await call("qa_start_session", { test_name: "tabs" });
   await call("qa_navigate", { url: `${baseUrl}/tabs`, step_description: "open tabs page" });
-  const pass = async (args, label) => {
+  const pass = async (args: Args, label: string) => {
     const r = await call("qa_assert", { step_description: label, ...args });
     assert.equal(r.json.status, "pass", `${label}: ${r.text}`);
   };
@@ -541,8 +614,8 @@ test("tabs: popups auto-switch, list/switch/close/new, self-closing tab", { time
 test("dialogs: dismissed by default, accept once/persist, prompt text, dialog_shown", { timeout: 90_000 }, async () => {
   await call("qa_start_session", { test_name: "dialogs" });
   await call("qa_navigate", { url: `${baseUrl}/dialogs`, step_description: "open dialogs page" });
-  const click = (id) => call("qa_action", { action: "click", selector: id, step_description: `click ${id}` });
-  const shows = async (expected) => {
+  const click = (id: string) => call("qa_action", { action: "click", selector: id, step_description: `click ${id}` });
+  const shows = async (expected: string) => {
     const r = await call("qa_assert", { type: "text_present", expected, step_description: `shows ${expected}` });
     assert.equal(r.json.status, "pass", r.text);
   };
@@ -597,10 +670,9 @@ test("snapshot refs: qa_snapshot, ref selectors, iframes, stale refs", { timeout
   await call("qa_start_session", { test_name: "refs" });
   await call("qa_navigate", { url: `${baseUrl}/form`, step_description: "open form" });
 
-  const snap = await client.callTool({ name: "qa_snapshot", arguments: {} });
-  const body = snap.content[0].text;
+  const body = await raw("qa_snapshot");
   assert.match(body, /^url: http:\/\/127\.0\.0\.1:\d+\/form\ntitle: Fixture\ntab: #1 of 1/);
-  const ref = (re) => {
+  const ref = (re: RegExp) => {
     const m = body.match(re);
     assert.ok(m, `ref for ${re} in snapshot:\n${body}`);
     return m[1];
@@ -610,7 +682,7 @@ test("snapshot refs: qa_snapshot, ref selectors, iframes, stale refs", { timeout
   const agree = ref(/checkbox "I agree" \[ref=(e\d+)\]/);
   const go = ref(/button "Go" \[ref=(e\d+)\]/);
 
-  const ok = async (args) => {
+  const ok = async (args: Args) => {
     const r = await call("qa_action", { step_description: "via ref", ...args });
     assert.equal(r.json.status, "pass", JSON.stringify(args) + " -> " + r.text);
   };
@@ -624,14 +696,14 @@ test("snapshot refs: qa_snapshot, ref selectors, iframes, stale refs", { timeout
   assert.match(ex.json.detail, /"Ana"/);
 
   // depth + truncation
-  const shallow = (await client.callTool({ name: "qa_snapshot", arguments: { depth: 1 } })).content[0].text;
+  const shallow = await raw("qa_snapshot", { depth: 1 });
   assert.ok(shallow.length < body.length, "depth shrinks the snapshot");
-  const cut = (await client.callTool({ name: "qa_snapshot", arguments: { max_chars: 500 } })).content[0].text;
-  assert.match(await Promise.resolve(cut), /^url: /);
+  const cut = await raw("qa_snapshot", { max_chars: 500 });
+  assert.match(cut, /^url: /);
 
   // iframe content gets refs too
   await call("qa_navigate", { url: `${baseUrl}/frames`, step_description: "open frames" });
-  const fbody = (await client.callTool({ name: "qa_snapshot", arguments: {} })).content[0].text;
+  const fbody = await raw("qa_snapshot");
   const frameBtn = fbody.match(/button "In frame" \[ref=(f\d+e\d+)\]/)?.[1];
   assert.ok(frameBtn, "iframe button has an f-prefixed ref:\n" + fbody);
   await ok({ action: "click", selector: `ref=${frameBtn}` });

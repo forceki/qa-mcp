@@ -226,8 +226,8 @@ The browser is launched headless with `--disable-gpu --no-sandbox --disable-dev-
 
 ```bash
 npm run dev          # run src/server.ts with Bun
-npm run typecheck    # tsc --noEmit
-npm test             # build, then end-to-end tests against a local fixture site (no internet needed)
+npm run typecheck    # type-check src/ and test/
+npm test             # build, compile the TypeScript tests to dist-test/, run them against a local fixture site (no internet needed)
 npm run build        # compile to dist/
 ```
 
