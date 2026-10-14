@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "qa-agent": {
+      "command": "node",
+      "args": ["/home/ayase/Documents/my-project/qa-agent/dist/server.js"],
+      "env": {
+        "QA_EVIDENCE_DIR": "/home/ayase/Documents/my-project/qa-agent/evidence"
+      }
+    }
+  }
+}
