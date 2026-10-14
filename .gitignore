@@ -1,6 +1,6 @@
 node_modules/
 dist/
-evidence/
+result/
 *.log
 .DS_Store
 dist-test/

@@ -33,7 +33,7 @@ const FORM = `<!doctype html><html><head><title>Fixture</title></head><body>
 
 let httpServer: http.Server;
 let baseUrl: string;
-let evidence: string;
+let resultDir: string;
 let client: Client;
 
 before(async () => {
@@ -106,13 +106,13 @@ before(async () => {
   await new Promise<void>((r) => httpServer.listen(0, "127.0.0.1", r));
   baseUrl = `http://127.0.0.1:${(httpServer.address() as AddressInfo).port}`;
 
-  evidence = mkdtempSync(path.join(tmpdir(), "qa-evidence-"));
+  resultDir = mkdtempSync(path.join(tmpdir(), "qa-result-"));
   client = new Client({ name: "test", version: "1" });
   await client.connect(
     new StdioClientTransport({
       command: "node",
       args: [path.join(root, "dist", "server.js")],
-      env: { ...process.env, QA_EVIDENCE_DIR: evidence, QA_STATE_DIR: path.join(evidence, "states"), QA_TEST_PASS: "s3cret", QA_ASSERT_TIMEOUT_MS: "1500", QA_TIMEOUT_MS: "2000" },
+      env: { ...process.env, QA_RESULT_DIR: resultDir, QA_STATE_DIR: path.join(resultDir, "states"), QA_TEST_PASS: "s3cret", QA_ASSERT_TIMEOUT_MS: "1500", QA_TIMEOUT_MS: "2000" },
     }),
   );
 });
@@ -120,7 +120,7 @@ before(async () => {
 after(async () => {
   await client?.close();
   await new Promise<void>((r) => (httpServer ? httpServer.close(() => r()) : r()));
-  if (evidence) rmSync(evidence, { recursive: true, force: true });
+  if (resultDir) rmSync(resultDir, { recursive: true, force: true });
 });
 
 interface ApiJson {
@@ -164,7 +164,7 @@ interface Json {
   diagnostics: { console: string; aria: string };
   api: ApiJson;
   // qa_start_session
-  evidence_dir: string;
+  result_dir: string;
   basic_auth: boolean;
   loaded_state: string | null;
   // qa_finish_session
@@ -228,7 +228,7 @@ test("tools fail cleanly without a session", async () => {
 test("full flow: every action and assertion type, report, screenshots", { timeout: 120_000 }, async () => {
   const start = await call("qa_start_session", { test_name: "Full Flow" });
   assert.equal(start.isError, false);
-  const dir = start.json.evidence_dir;
+  const dir = start.json.result_dir;
 
   const ok = async (name: string, args: Args) => {
     const r = await call(name, args);
@@ -252,7 +252,7 @@ test("full flow: every action and assertion type, report, screenshots", { timeou
   await ok("qa_action", { action: "check", selector: "#agree", step_description: "check again" });
   await ok("qa_action", { action: "hover", selector: "#hover", step_description: "hover" });
   await ok("qa_assert", { type: "text_present", expected: "hovered", step_description: "hover effect" });
-  const fixture = path.join(evidence, "upload.txt");
+  const fixture = path.join(resultDir, "upload.txt");
   writeFileSync(fixture, "hi");
   await ok("qa_action", { action: "upload", selector: "#file", value: fixture, step_description: "upload" });
   await ok("qa_action", { action: "scroll", selector: "#bottom", step_description: "scroll" });
@@ -281,7 +281,7 @@ test("full flow: every action and assertion type, report, screenshots", { timeou
 
 test("failed step records diagnostics and a FAIL report", { timeout: 60_000 }, async () => {
   const start = await call("qa_start_session", { test_name: "failure" });
-  const dir = start.json.evidence_dir;
+  const dir = start.json.result_dir;
   await call("qa_navigate", { url: `${baseUrl}/form`, step_description: "open" });
 
   const bad = await call("qa_action", { action: "click", selector: "#does-not-exist", step_description: "click missing" });
@@ -333,13 +333,13 @@ test("basic auth: correct credentials pass, wrong ones fail", { timeout: 60_000 
 test("starting a new session closes the previous one", { timeout: 60_000 }, async () => {
   const a = await call("qa_start_session", { test_name: "first" });
   const b = await call("qa_start_session", { test_name: "second" });
-  assert.notEqual(a.json.evidence_dir, b.json.evidence_dir);
+  assert.notEqual(a.json.result_dir, b.json.result_dir);
   assert.equal((await call("qa_finish_session", {})).json.steps, 0);
 });
 
 test("API: create -> use -> delete with saved variables, placeholders and report details", { timeout: 60_000 }, async () => {
   const start = await call("qa_start_session", { test_name: "api flow" });
-  const dir = start.json.evidence_dir;
+  const dir = start.json.result_dir;
   await call("qa_navigate", { url: `${baseUrl}/form`, step_description: "open app (sets origin for relative URLs)" });
 
   const login = await call("qa_request", {
@@ -502,10 +502,10 @@ test("saved login state: save once, reuse in later sessions", { timeout: 90_000 
   const saved = await call("qa_save_state", { name: "dev-admin" });
   assert.equal(saved.isError, false, saved.text);
   assert.match(saved.json.detail, /Saved state "dev-admin" \(\d+ cookies/);
-  const file = path.join(evidence, "states", "dev-admin.json");
+  const file = path.join(resultDir, "states", "dev-admin.json");
   assert.ok(existsSync(file), "state file written outside the run folder");
   assert.equal((statSync(file).mode & 0o777).toString(8), "600", "state file is private");
-  assert.ok(!file.startsWith(JSON.parse((await call("qa_finish_session", {})).text).report.replace(/README\.md$/, "")), "not in evidence dir");
+  assert.ok(!file.startsWith(JSON.parse((await call("qa_finish_session", {})).text).report.replace(/README\.md$/, "")), "not in resultDir dir");
 
   const list = (await call("qa_list_states")).json.states;
   assert.equal(list.length, 1);

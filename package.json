@@ -1,7 +1,7 @@
 {
   "name": "qa-agent-mcp",
   "version": "1.0.0",
-  "description": "Local-first MCP server that acts as an autonomous QA engineer with screenshot evidence",
+  "description": "Local-first MCP server that acts as an autonomous QA engineer with screenshot results",
   "type": "module",
   "main": "dist/server.js",
   "bin": {

@@ -18,4 +18,4 @@ Run each step with the `qa_*` tools. If a selector fails, call `qa_inspect_dom`,
 10. `qa_finish_session` with summary notes.
 
 ## Expected result
-All steps PASS; `evidence/login-example-<timestamp>/README.md` embeds 8 screenshots.
+All steps PASS; `result/login-example-<timestamp>/README.md` embeds 8 screenshots.

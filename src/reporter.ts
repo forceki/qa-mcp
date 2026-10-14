@@ -59,7 +59,7 @@ export async function writeReport(session: QASession, summaryNotes?: string): Pr
   }
   lines.push("");
 
-  lines.push("## Evidence", "");
+  lines.push("## Results", "");
   for (const s of steps) {
     lines.push(`### Step ${s.step}: ${s.description} — ${badge(s.status)}`, "");
     lines.push(`- **Type:** ${s.kind}`);

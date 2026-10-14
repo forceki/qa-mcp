@@ -20,7 +20,7 @@ import {
 } from "./state.js";
 
 // NOTE: stdout is reserved for the MCP protocol. Log only to stderr.
-const EVIDENCE_ROOT = process.env.QA_EVIDENCE_DIR ?? path.resolve(process.cwd(), "evidence");
+const RESULT_ROOT = process.env.QA_RESULT_DIR ?? path.resolve(process.cwd(), "result");
 
 const server = new McpServer({ name: "qa-agent", version: "1.0.0" });
 
@@ -175,7 +175,7 @@ server.registerTool(
   "qa_start_session",
   {
     description:
-      "Start a QA run: creates ./evidence/<test-name>-<timestamp>/, launches Chromium, resets the step counter. Any previous unfinished session is closed.",
+      "Start a QA run: creates ./result/<test-name>-<timestamp>/, launches Chromium, resets the step counter. Any previous unfinished session is closed.",
     inputSchema: {
       test_name: z.string().min(1).describe("Human-readable test name"),
       basic_auth_username: z
@@ -214,7 +214,7 @@ server.registerTool(
         await previous.close();
         setSession(null);
       }
-      const session = await QASession.start(test_name, EVIDENCE_ROOT, {
+      const session = await QASession.start(test_name, RESULT_ROOT, {
         httpCredentials: creds,
         storageStatePath,
         loadedState: load_state,
@@ -225,7 +225,7 @@ server.registerTool(
       }
       setSession(session);
       return text(
-        JSON.stringify({ status: "started", test_name, evidence_dir: session.dir, basic_auth: Boolean(creds), loaded_state: load_state ?? null }, null, 2),
+        JSON.stringify({ status: "started", test_name, result_dir: session.dir, basic_auth: Boolean(creds), loaded_state: load_state ?? null }, null, 2),
       );
     } catch (err) {
       return fromError(err);
@@ -238,7 +238,7 @@ server.registerTool(
   {
     description:
       "Save the browser's login state (cookies, localStorage, IndexedDB) under a name so later sessions can skip logging in via qa_start_session `load_state`. " +
-      `Stored outside the evidence folder in ${STATE_DIR} (file mode 600) because it holds live session cookies. Call it after a successful login.`,
+      `Stored outside the result folder in ${STATE_DIR} (file mode 600) because it holds live session cookies. Call it after a successful login.`,
     inputSchema: {
       name: z.string().min(1).describe("e.g. 'dev-admin'. Letters, numbers, _ - . only. Overwrites an existing state with the same name."),
       step_description: z.string().optional(),
@@ -255,7 +255,7 @@ server.registerTool(
           const { cookies, origins } = await s.saveState(file);
           return `Saved state "${name}" (${cookies} cookies, ${origins} origins with storage). Load it with qa_start_session load_state "${name}".`;
         },
-        { evidence: false },
+        { capture: false },
       );
       return stepResponse(r, s.dir);
     } catch (err) {
@@ -304,7 +304,7 @@ server.registerTool(
           s.setDialogPolicy({ action, promptText: prompt_text === undefined ? undefined : resolve(prompt_text, s), persist });
           return `Dialogs will be ${action === "accept" ? "accepted" : "dismissed"} (${persist ? "until changed" : "next dialog only"})`;
         },
-        { evidence: false },
+        { capture: false },
       );
       return stepResponse(r, s.dir);
     } catch (err) {
@@ -633,7 +633,7 @@ server.registerTool(
           if (problems.length) throw new Error(problems.join("\n"));
           return `${a.method} ${url} -> ${resp.status()}`;
         },
-        { evidence: false },
+        { capture: false },
       );
       if (api) {
         r.api = api;
@@ -789,7 +789,7 @@ server.registerTool(
 server.registerTool(
   "qa_finish_session",
   {
-    description: "Close the browser, compile README.md (step table + screenshot gallery) in the evidence folder, and return its path.",
+    description: "Close the browser, compile README.md (step table + screenshot gallery) in the result folder, and return its path.",
     inputSchema: { summary_notes: z.string().optional() },
   },
   async ({ summary_notes }) => {
@@ -817,4 +817,4 @@ process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
 
 await server.connect(new StdioServerTransport());
-console.error(`[qa-agent] MCP server ready. Evidence root: ${EVIDENCE_ROOT}`);
+console.error(`[qa-agent] MCP server ready. Result root: ${RESULT_ROOT}`);

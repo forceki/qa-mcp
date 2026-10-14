@@ -37,7 +37,7 @@ export interface StepResult {
   error?: string;
   /** Console errors/warnings, uncaught page errors, failed requests and HTTP >= 400 seen during this step. */
   issues: string[];
-  /** Extra evidence files (relative to the run dir), only written for failed steps. */
+  /** Extra result files (relative to the run dir), only written for failed steps. */
   diagnostics?: { console: string; aria: string };
   api?: ApiRecord;
   /** JS dialogs (alert/confirm/prompt/beforeunload) that appeared during this step and how they were answered. */
@@ -289,7 +289,7 @@ export class QASession {
 
   static async start(
     testName: string,
-    evidenceRoot: string,
+    resultRoot: string,
     opts: {
       httpCredentials?: { username: string; password: string };
       storageStatePath?: string;
@@ -298,7 +298,7 @@ export class QASession {
   ): Promise<QASession> {
     const { httpCredentials, storageStatePath, loadedState } = opts;
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-    const dir = path.resolve(evidenceRoot, `${slugify(testName)}-${timestamp}`);
+    const dir = path.resolve(resultRoot, `${slugify(testName)}-${timestamp}`);
     await mkdir(dir, { recursive: true });
 
     const channel = process.env.QA_BROWSER_CHANNEL; // e.g. "chrome" to use system Chrome
@@ -359,9 +359,9 @@ export class QASession {
     kind: string,
     description: string,
     fn: () => Promise<string | void>,
-    opts: { evidence?: boolean; watchPopups?: boolean } = {},
+    opts: { capture?: boolean; watchPopups?: boolean } = {},
   ): Promise<StepResult> {
-    const evidence = opts.evidence !== false; // false for API-only steps: no page screenshot/diagnostics
+    const capture = opts.capture !== false; // false for API-only steps: no page screenshot/diagnostics
     const step = ++this.stepCounter;
     const startedAt = new Date();
     const t0 = performance.now();
@@ -405,9 +405,9 @@ export class QASession {
 
     const durationMs = Math.round(performance.now() - t0);
     const file = `step-${step}.png`;
-    let screenshot: string | null = evidence ? file : null;
+    let screenshot: string | null = capture ? file : null;
     try {
-      if (!evidence) throw new Error("no page evidence for this step");
+      if (!capture) throw new Error("no page capture for this step");
       // Full-page capture on failure so the whole page is available for diagnosis.
       if (!page) throw new Error("no open tab");
       await page.screenshot({ path: path.join(this.dir, file), fullPage: status === "fail", timeout: 10_000 });
@@ -416,7 +416,7 @@ export class QASession {
     }
 
     let diagnostics: StepResult["diagnostics"];
-    if (status === "fail" && evidence) {
+    if (status === "fail" && capture) {
       const consoleFile = `step-${step}-console.txt`;
       const ariaFile = `step-${step}-aria.yml`;
       const log = this.events.map((e) => e.text).join("\n") || "(no console output captured)";

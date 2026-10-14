@@ -3,7 +3,7 @@
 A local-first [MCP](https://modelcontextprotocol.io) server that lets Claude Code act as an autonomous QA engineer. It drives a real Chromium/Chrome browser with Playwright, saves a screenshot for every step, and compiles a visual Markdown report. No cloud services involved.
 
 ```
-evidence/
+result/
 └── login-example-2026-10-14T15-29-00-018Z/
     ├── step-1.png
     ├── step-2.png
@@ -35,7 +35,7 @@ Run from the project folder (registers it for every project):
 
 ```bash
 claude mcp add qa-agent -s user \
-  -e QA_EVIDENCE_DIR="$PWD/evidence" \
+  -e QA_RESULT_DIR="$PWD/result" \
   -- node "$PWD/dist/server.js"
 ```
 
@@ -53,7 +53,7 @@ Sites behind HTTP Basic Auth (the browser popup) are handled at session start. K
 
 ```bash
 claude mcp add qa-agent -s user \
-  -e QA_EVIDENCE_DIR="$PWD/evidence" \
+  -e QA_RESULT_DIR="$PWD/result" \
   -e QA_BASIC_AUTH_USER=devuser -e QA_BASIC_AUTH_PASS=devpass \
   -e QA_APP_USER=tester@example.com -e QA_APP_PASS=app-password \
   -- node "$PWD/dist/server.js"
@@ -61,7 +61,7 @@ claude mcp add qa-agent -s user \
 
 - `qa_start_session` uses `QA_BASIC_AUTH_USER` / `QA_BASIC_AUTH_PASS` automatically, or accepts `basic_auth_username` / `basic_auth_password` (which may be `{{env:NAME}}`).
 - For the app's own login form, use `{{env:NAME}}` placeholders in `qa_action` values, e.g. `fill #password` with `{{env:QA_APP_PASS}}`. The report records only "Filled #password", never the value.
-- Screenshots still show non-masked fields, so use a dedicated test account and keep `evidence/` out of git.
+- Screenshots still show non-masked fields, so use a dedicated test account and keep `result/` out of git.
 
 ## Snapshot refs (no selector guessing)
 
@@ -127,7 +127,7 @@ Example prompt: "Log in to https://dev.example.com as the test user and save the
 
 Notes:
 - **Basic Auth is not part of the state.** Pass it each time (or set `QA_BASIC_AUTH_USER` / `QA_BASIC_AUTH_PASS`).
-- **A state file is a live session.** Anyone holding the file can act as that user. Files are written with mode 600 to `~/.qa-agent/states/`, outside any repo and outside the evidence folder, so they don't end up in reports or git. Use a dedicated test account and delete a state by removing its file.
+- **A state file is a live session.** Anyone holding the file can act as that user. Files are written with mode 600 to `~/.qa-agent/states/`, outside any repo and outside the result folder, so they don't end up in reports or git. Use a dedicated test account and delete a state by removing its file.
 - The report header shows `Login state: loaded <name>` so you can see a run didn't log in itself.
 
 ## API testing and multi-step flows
@@ -185,7 +185,7 @@ Or drive it ad hoc:
 
 | Tool | Purpose |
 |------|---------|
-| `qa_start_session(test_name, load_state?, basic_auth_*?)` | Creates `evidence/<name>-<timestamp>/`, launches the browser, resets the step counter. `load_state` starts already logged in |
+| `qa_start_session(test_name, load_state?, basic_auth_*?)` | Creates `result/<name>-<timestamp>/`, launches the browser, resets the step counter. `load_state` starts already logged in |
 | `qa_navigate(url, step_description)` | Goes to a URL (waits for `domcontentloaded`), screenshots it |
 | `qa_action(action, selector, value?, step_description)` | `click`, `dblclick`, `hover`, `scroll`, `check`, `uncheck`, `fill`, `press`, `select`, `upload` on a selector, then screenshots |
 | `qa_tab(action, index?, url?)` | `list`, `new`, `switch`, `close` browser tabs. A step that opens a tab (target=_blank, window.open) switches to it automatically |
@@ -201,7 +201,7 @@ Or drive it ad hoc:
 
 A failed action or assertion is recorded as a FAIL step. The tool returns an error with a hint to call `qa_inspect_dom` and retry with a better selector.
 
-## Evidence captured
+## Results captured
 
 - `step-N.png` for every step (full-page when the step fails).
 - Console errors/warnings, uncaught page errors, failed requests and HTTP 4xx/5xx seen during each step. They are returned by the tool and listed under "Browser issues" in the report, even when the step passed.
@@ -211,7 +211,7 @@ A failed action or assertion is recorded as a FAIL step. The tool returns an err
 
 | Env var | Default | Description |
 |---------|---------|-------------|
-| `QA_EVIDENCE_DIR` | `./evidence` (server's cwd) | Where run folders are written |
+| `QA_RESULT_DIR` | `./result` (server's cwd) | Where run folders are written |
 | `QA_BROWSER_CHANNEL` | auto (bundled, then `chrome`) | Force a browser channel, e.g. `chrome` |
 | `QA_TIMEOUT_MS` | `10000` | Per-action timeout |
 | `QA_NAV_TIMEOUT_MS` | `30000` | Navigation timeout |
