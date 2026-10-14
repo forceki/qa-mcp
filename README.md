@@ -171,6 +171,16 @@ Example prompts: "test the create-user API, show full request and response in th
 
 `Authorization`, `Cookie`, `Set-Cookie`, API-key headers and JSON keys such as `password`, `token` and `secret` are shown as `***`. Their values are also masked if a server echoes them back in another field. Still, use a dedicated test account.
 
+## QA skills (analysis, test cases, running, reporting)
+
+Besides the MCP tools, `skills/` has five Claude Code skills that guide the whole QA loop: `qa-analyze`, `qa-test-cases`, `qa-run`, `qa-explore` and `qa-report`. See [skills/README.md](skills/README.md).
+
+```bash
+npm run install:skills      # links them into ~/.claude/skills, then restart Claude Code
+```
+
+Then ask in plain language: "analyze the checkout feature and write test cases", "run the P0 cases", "make a test report with bug drafts".
+
 ## Usage
 
 Ask Claude in plain language:

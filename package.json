@@ -13,7 +13,8 @@
     "dev": "bun run src/server.ts",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
     "install:browser": "playwright install chromium",
-    "test": "npm run build && tsc -p tsconfig.test.json && node --test --test-timeout=120000 dist-test/"
+    "test": "npm run build && tsc -p tsconfig.test.json && node --test --test-timeout=120000 dist-test/",
+    "install:skills": "bash scripts/install-skills.sh"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
