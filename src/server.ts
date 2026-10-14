@@ -9,6 +9,9 @@ import {
   getSession,
   requireSession,
   setSession,
+  ASSERT_TIMEOUT_MS,
+  REQUEST_TIMEOUT_MS,
+  type ApiRecord,
   type StepResult,
 } from "./state.js";
 
@@ -19,13 +22,81 @@ const server = new McpServer({ name: "qa-agent", version: "1.0.0" });
 
 type ToolResult = { content: { type: "text"; text: string }[]; isError?: boolean };
 
-/** Replaces {{env:NAME}} with process.env.NAME so secrets never need to appear in chat or specs. */
-function resolveEnv(value: string): string {
-  return value.replace(/\{\{env:([A-Za-z0-9_]+)\}\}/g, (_, name: string) => {
-    const v = process.env[name];
-    if (v === undefined) throw new Error(`Environment variable ${name} is not set.`);
+/**
+ * Resolves placeholders so secrets and generated data never need to appear in chat or specs:
+ *   {{env:NAME}}   environment variable (value is masked in reports)
+ *   {{var:NAME}}   value saved by an earlier qa_request `save`
+ *   {{rand}}       random token, stable for the whole session (unique emails, names, ...)
+ *   {{timestamp}}  session start time in ms, stable for the whole session
+ */
+function resolve(value: string, s?: QASession): string {
+  return value.replace(/\{\{\s*(env:[A-Za-z0-9_]+|var:[A-Za-z0-9_.-]+|rand|timestamp)\s*\}\}/g, (_, key: string) => {
+    if (key === "rand" || key === "timestamp") {
+      if (!s) throw new Error(`{{${key}}} needs an active session.`);
+      return key === "rand" ? s.runId : String(s.startedAt.getTime());
+    }
+    const name = key.slice(key.indexOf(":") + 1);
+    if (key.startsWith("env:")) {
+      const v = process.env[name];
+      if (v === undefined) throw new Error(`Environment variable ${name} is not set.`);
+      s?.secrets.add(v);
+      return v;
+    }
+    const v = s?.vars.get(name);
+    if (v === undefined) throw new Error(`Variable "${name}" is not set. Save it first with qa_request \`save\`.`);
     return v;
   });
+}
+
+/** Resolves placeholders inside every string of a JSON-like value. */
+function deepResolve(x: unknown, s: QASession): unknown {
+  if (typeof x === "string") return resolve(x, s);
+  if (Array.isArray(x)) return x.map((i) => deepResolve(i, s));
+  if (x && typeof x === "object") return Object.fromEntries(Object.entries(x).map(([k, val]) => [k, deepResolve(val, s)]));
+  return x;
+}
+
+const SENSITIVE_KEY = /pass(word)?|token|secret|authorization|api[-_]?key|cookie|session/i;
+
+function redactHeaders(h: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(Object.entries(h).map(([k, v]) => [k, SENSITIVE_KEY.test(k) ? "***" : v]));
+}
+
+function redactJson(x: unknown): unknown {
+  if (Array.isArray(x)) return x.map(redactJson);
+  if (x && typeof x === "object")
+    return Object.fromEntries(
+      Object.entries(x).map(([k, val]) => [k, SENSITIVE_KEY.test(k) ? "***" : redactJson(val)]),
+    );
+  return x;
+}
+
+/** Registers the values of sensitive keys/headers as secrets so servers that echo them back can't leak them. */
+function collectSecrets(x: unknown, s: QASession): void {
+  if (Array.isArray(x)) return x.forEach((i) => collectSecrets(i, s));
+  if (x && typeof x === "object") {
+    for (const [k, val] of Object.entries(x)) {
+      if (SENSITIVE_KEY.test(k) && typeof val === "string") s.secrets.add(val);
+      else collectSecrets(val, s);
+    }
+  }
+}
+
+/** Pretty-prints JSON bodies (redacting sensitive keys), passes other text through. */
+function prepareBody(raw: string, s: QASession, max: number): { text: string; truncated: boolean } {
+  let out = raw;
+  try {
+    out = JSON.stringify(redactJson(JSON.parse(raw)), null, 2);
+  } catch {}
+  out = s.mask(out);
+  return out.length > max ? { text: out.slice(0, max) + "\n… (truncated)", truncated: true } : { text: out, truncated: false };
+}
+
+function getPath(obj: unknown, dotPath: string): unknown {
+  return dotPath
+    .split(".")
+    .filter(Boolean)
+    .reduce<unknown>((cur, key) => (cur && typeof cur === "object" ? (cur as Record<string, unknown>)[key] : undefined), obj);
 }
 
 const text = (t: string, isError = false): ToolResult => ({
@@ -45,7 +116,21 @@ function stepResponse(r: StepResult, dir: string): ToolResult {
     screenshot: r.screenshot ? path.join(dir, r.screenshot) : null,
     detail: r.detail,
     error: r.error,
-    hint: r.status === "fail" ? "Call qa_inspect_dom to find a working selector, then retry." : undefined,
+    browser_issues: r.issues.length ? r.issues.slice(0, 10) : undefined,
+    diagnostics: r.diagnostics
+      ? { console: path.join(dir, r.diagnostics.console), aria: path.join(dir, r.diagnostics.aria) }
+      : undefined,
+    api: r.api
+      ? {
+          method: r.api.method,
+          url: r.api.url,
+          status: r.api.status,
+          response_body: r.api.responseBody,
+          saved_variables: r.api.saved.length ? r.api.saved : undefined,
+        }
+      : undefined,
+    hint:
+      r.status === "fail" && !r.api ? "Call qa_inspect_dom to find a working selector, then retry." : undefined,
   };
   return text(JSON.stringify(payload, null, 2), r.status === "fail");
 }
@@ -74,10 +159,14 @@ server.registerTool(
         await previous.close();
         setSession(null);
       }
-      const user = basic_auth_username ? resolveEnv(basic_auth_username) : process.env.QA_BASIC_AUTH_USER;
-      const pass = basic_auth_password ? resolveEnv(basic_auth_password) : process.env.QA_BASIC_AUTH_PASS;
+      const user = basic_auth_username ? resolve(basic_auth_username) : process.env.QA_BASIC_AUTH_USER;
+      const pass = basic_auth_password ? resolve(basic_auth_password) : process.env.QA_BASIC_AUTH_PASS;
       const creds = user && pass ? { username: user, password: pass } : undefined;
       const session = await QASession.start(test_name, EVIDENCE_ROOT, creds);
+      if (creds) {
+        session.secrets.add(creds.username);
+        session.secrets.add(creds.password);
+      }
       setSession(session);
       return text(
         JSON.stringify({ status: "started", test_name, evidence_dir: session.dir, basic_auth: Boolean(creds) }, null, 2),
@@ -91,9 +180,10 @@ server.registerTool(
 server.registerTool(
   "qa_navigate",
   {
-    description: "Navigate to a URL (waits for domcontentloaded) and capture a step screenshot.",
+    description:
+      "Navigate to a URL (waits for domcontentloaded) and capture a step screenshot. Supports {{var:NAME}} / {{rand}} placeholders.",
     inputSchema: {
-      url: z.string().url(),
+      url: z.string().min(1),
       step_description: z.string().min(1),
     },
   },
@@ -101,8 +191,9 @@ server.registerTool(
     try {
       const s = requireSession();
       const r = await s.runStep("navigate", step_description, async () => {
-        const resp = await s.page.goto(url, { waitUntil: "domcontentloaded" });
-        return `Navigated to ${url} (HTTP ${resp?.status() ?? "n/a"}), title: "${await s.page.title()}"`;
+        const target = new URL(resolve(url, s)).toString();
+        const resp = await s.page.goto(target, { waitUntil: "domcontentloaded" });
+        return `Navigated to ${target} (HTTP ${resp?.status() ?? "n/a"}), title: "${await s.page.title()}"`;
       });
       return stepResponse(r, s.dir);
     } catch (err) {
@@ -115,9 +206,12 @@ server.registerTool(
   "qa_action",
   {
     description:
-      "Perform a DOM action (click | fill | press) on a selector and capture a post-action screenshot. `value` is required for fill (text) and press (key, e.g. 'Enter').",
+      "Perform a DOM action on a selector and capture a post-action screenshot. " +
+      "Actions: click, dblclick, hover, scroll (into view), check, uncheck (no value); " +
+      "fill (value = text), press (value = key e.g. 'Enter'), select (value = option value or label), upload (value = local file path). " +
+      "`value` supports {{env:NAME}} placeholders.",
     inputSchema: {
-      action: z.enum(["click", "fill", "press"]),
+      action: z.enum(["click", "dblclick", "hover", "scroll", "check", "uncheck", "fill", "press", "select", "upload"]),
       selector: z.string().min(1).describe("Playwright selector (CSS, text=, role=, etc.)"),
       value: z.string().optional(),
       step_description: z.string().min(1),
@@ -127,20 +221,231 @@ server.registerTool(
     try {
       const s = requireSession();
       const r = await s.runStep(action, step_description, async () => {
-        const loc = s.page.locator(selector).first();
-        if (action === "click") {
-          await loc.click();
-          return `Clicked ${selector}`;
+        const loc = s.page.locator(resolve(selector, s)).first();
+        switch (action) {
+          case "click":
+            await loc.click();
+            return `Clicked ${selector}`;
+          case "dblclick":
+            await loc.dblclick();
+            return `Double-clicked ${selector}`;
+          case "hover":
+            await loc.hover();
+            return `Hovered ${selector}`;
+          case "scroll":
+            await loc.scrollIntoViewIfNeeded();
+            return `Scrolled ${selector} into view`;
+          case "check":
+            await loc.check();
+            return `Checked ${selector}`;
+          case "uncheck":
+            await loc.uncheck();
+            return `Unchecked ${selector}`;
         }
         if (value === undefined) throw new Error(`"value" is required for action "${action}".`);
-        const resolved = resolveEnv(value);
-        if (action === "fill") {
-          await loc.fill(resolved);
-          return `Filled ${selector}`;
+        const resolved = resolve(value, s);
+        switch (action) {
+          case "fill":
+            await loc.fill(resolved);
+            return `Filled ${selector}`;
+          case "press":
+            await loc.press(resolved);
+            return `Pressed "${value}" on ${selector}`;
+          case "select": {
+            // Match by option value first, then fall back to the visible label.
+            const picked = await loc
+              .selectOption({ value: resolved }, { timeout: 2_000 })
+              .catch(() => loc.selectOption({ label: resolved }));
+            return `Selected ${JSON.stringify(picked)} in ${selector}`;
+          }
+          case "upload":
+            await loc.setInputFiles(resolved);
+            return `Uploaded ${resolved} to ${selector}`;
         }
-        await loc.press(resolved);
-        return `Pressed "${value}" on ${selector}`;
       });
+      return stepResponse(r, s.dir);
+    } catch (err) {
+      return fromError(err);
+    }
+  },
+);
+
+server.registerTool(
+  "qa_extract",
+  {
+    description:
+      "Read a value from the page and save it as a variable for later {{var:NAME}} use (e.g. an ID shown after creating a record). " +
+      "source: text (visible text), value (input value), attribute (needs `attribute`), count (number of matching elements), url, title. " +
+      "Optional `regex` keeps capture group 1 (or the whole match) of the extracted text. Captures a step screenshot.",
+    inputSchema: {
+      source: z.enum(["text", "value", "attribute", "count", "url", "title"]),
+      selector: z.string().optional().describe("Required for text, value, attribute and count"),
+      attribute: z.string().optional().describe("Attribute name when source = attribute, e.g. href, data-id"),
+      regex: z.string().optional().describe("e.g. 'Order #(\\d+)' to pull a number out of a sentence"),
+      save_as: z.string().regex(/^[A-Za-z0-9_.-]+$/).describe("Variable name, used later as {{var:NAME}}"),
+      step_description: z.string().min(1),
+    },
+  },
+  async ({ source, selector, attribute, regex, save_as, step_description }) => {
+    try {
+      const s = requireSession();
+      let shown = "";
+      const r = await s.runStep("extract", step_description, async () => {
+        let value: string;
+        if (source === "url") value = s.page.url();
+        else if (source === "title") value = await s.page.title();
+        else {
+          if (!selector) throw new Error(`"selector" is required for source "${source}".`);
+          const loc = s.page.locator(resolve(selector, s));
+          if (source === "count") value = String(await loc.count());
+          else {
+            const first = loc.first();
+            if (source === "text") value = (await first.innerText()).trim();
+            else if (source === "value") value = await first.inputValue();
+            else {
+              if (!attribute) throw new Error('"attribute" is required for source "attribute".');
+              const a = await first.getAttribute(attribute);
+              if (a === null) throw new Error(`Attribute "${attribute}" not found on ${selector}`);
+              value = a;
+            }
+          }
+        }
+        if (regex) {
+          const m = value.match(new RegExp(regex));
+          if (!m) throw new Error(`Regex /${regex}/ did not match extracted value "${s.mask(value.slice(0, 200))}"`);
+          value = m[1] ?? m[0];
+        }
+        s.vars.set(save_as, value);
+        if (SENSITIVE_KEY.test(save_as)) s.secrets.add(value);
+        shown = s.mask(value.length > 300 ? value.slice(0, 300) + "…" : value);
+        return `Extracted ${source}${selector ? ` of ${selector}` : ""} -> {{var:${save_as}}} = ${JSON.stringify(shown)}`;
+      });
+      return stepResponse(r, s.dir);
+    } catch (err) {
+      return fromError(err);
+    }
+  },
+);
+
+server.registerTool(
+  "qa_request",
+  {
+    description:
+      "Make an HTTP API call that shares the browser session's cookies and Basic Auth. Use it to create/clean up test data or to test an API directly. " +
+      "Placeholders {{env:NAME}}, {{var:NAME}}, {{rand}}, {{timestamp}} work in url, headers and body. " +
+      "`save` stores response fields (dot paths, e.g. data.id) as variables for later {{var:NAME}}. " +
+      "Passes when the status is 2xx unless expect_status is given. Sensitive headers/JSON keys are redacted in output and the report. " +
+      "`report_detail` and `report_note` control how this call appears in README.md.",
+    inputSchema: {
+      method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"]),
+      url: z.string().min(1).describe("Absolute URL, or a path resolved against the current page's origin"),
+      headers: z.record(z.string()).optional(),
+      body: z.union([z.string(), z.record(z.any()), z.array(z.any())]).optional().describe("JSON object/array (sent as JSON) or raw string"),
+      expect_status: z.union([z.number().int(), z.array(z.number().int())]).optional(),
+      expect_body_contains: z.string().optional(),
+      expect_json: z.record(z.any()).optional().describe("Map of dot-path -> expected value in the JSON response"),
+      save: z.record(z.string()).optional().describe("Map of variable name -> dot-path in the JSON response"),
+      step_description: z.string().min(1),
+      report_detail: z.enum(["summary", "full"]).default("full").describe("summary = method/URL/status only; full = also headers and bodies"),
+      max_body_chars: z.number().int().min(0).max(100000).default(2000).describe("Max body characters kept in output/report"),
+      report_note: z.string().optional().describe("Free-text note shown under this call in the report"),
+    },
+  },
+  async (a) => {
+    try {
+      const s = requireSession();
+      let api: ApiRecord | undefined;
+      const r = await s.runStep(
+        "api",
+        a.step_description,
+        async () => {
+          const rawUrl = resolve(a.url, s);
+          const base = /^https?:/.test(s.page.url()) ? s.page.url() : undefined;
+          const url = new URL(rawUrl, base).toString();
+          const headers = Object.fromEntries(Object.entries(a.headers ?? {}).map(([k, val]) => [k, resolve(val, s)]));
+          const body = a.body === undefined ? undefined : deepResolve(a.body, s);
+
+          collectSecrets(body, s);
+          for (const [k, val] of Object.entries(headers)) {
+            if (SENSITIVE_KEY.test(k)) {
+              s.secrets.add(val);
+              s.secrets.add(val.replace(/^(Bearer|Basic|Token)\s+/i, ""));
+            }
+          }
+
+          const t0 = performance.now();
+          const resp = await s.request.fetch(url, {
+            method: a.method,
+            headers,
+            data: body as string | object | undefined,
+            timeout: REQUEST_TIMEOUT_MS,
+            failOnStatusCode: false,
+          });
+          const durationMs = Math.round(performance.now() - t0);
+          const rawBody = a.method === "HEAD" ? "" : await resp.text();
+          let json: unknown;
+          try {
+            json = JSON.parse(rawBody);
+          } catch {}
+
+          collectSecrets(json, s);
+          const saved: string[] = [];
+          const problems: string[] = [];
+          for (const [name, p] of Object.entries(a.save ?? {})) {
+            const val = getPath(json, p);
+            if (val === undefined) {
+              problems.push(`save: "${p}" not found in response`);
+              continue;
+            }
+            const str = typeof val === "string" ? val : JSON.stringify(val);
+            s.vars.set(name, str);
+            if (SENSITIVE_KEY.test(name) || SENSITIVE_KEY.test(p)) s.secrets.add(str);
+            saved.push(name);
+          }
+
+          const reqBodyText = body === undefined ? undefined : typeof body === "string" ? body : JSON.stringify(body);
+          const reqPrepared = reqBodyText === undefined ? undefined : prepareBody(reqBodyText, s, a.max_body_chars);
+          const resPrepared = prepareBody(rawBody, s, a.max_body_chars);
+          api = {
+            method: a.method,
+            url,
+            status: resp.status(),
+            statusText: resp.statusText(),
+            durationMs,
+            requestHeaders: redactHeaders(headers),
+            requestBody: reqPrepared?.text,
+            responseHeaders: redactHeaders(resp.headers()),
+            responseBody: resPrepared.text || undefined,
+            truncated: Boolean(reqPrepared?.truncated || resPrepared.truncated),
+            reportDetail: a.report_detail,
+            note: a.report_note,
+            saved,
+          };
+
+          const allowed = a.expect_status === undefined ? undefined : [a.expect_status].flat();
+          if (allowed ? !allowed.includes(resp.status()) : resp.status() < 200 || resp.status() >= 300) {
+            problems.push(`Expected status ${allowed ? allowed.join("/") : "2xx"}, got ${resp.status()}`);
+          }
+          if (a.expect_body_contains !== undefined) {
+            const needle = resolve(a.expect_body_contains, s);
+            if (!rawBody.includes(needle)) problems.push(`Response body does not contain "${s.mask(needle)}"`);
+          }
+          for (const [p, want] of Object.entries(a.expect_json ?? {})) {
+            const wantResolved = deepResolve(want, s);
+            const got = getPath(json, p);
+            if (JSON.stringify(got) !== JSON.stringify(wantResolved)) {
+              problems.push(`JSON ${p}: expected ${s.mask(JSON.stringify(wantResolved))}, got ${s.mask(JSON.stringify(got))}`);
+            }
+          }
+          if (problems.length) throw new Error(problems.join("\n"));
+          return `${a.method} ${url} -> ${resp.status()}`;
+        },
+        { evidence: false },
+      );
+      if (api) {
+        r.api = api;
+        r.url = api.url;
+      }
       return stepResponse(r, s.dir);
     } catch (err) {
       return fromError(err);
@@ -212,12 +517,14 @@ server.registerTool(
       step_description: z.string().min(1),
     },
   },
-  async ({ type, expected, step_description }) => {
+  async ({ type, expected: expectedRaw, step_description }) => {
+    let expected = expectedRaw;
     try {
       const s = requireSession();
       const r = await s.runStep(`assert:${type}`, step_description, async () => {
+        expected = resolve(expected, s);
         if (type === "text_present") {
-          await s.page.getByText(expected).filter({ visible: true }).first().waitFor({ state: "visible", timeout: 5000 }).catch(() => {
+          await s.page.getByText(expected).filter({ visible: true }).first().waitFor({ state: "visible", timeout: ASSERT_TIMEOUT_MS }).catch(() => {
             throw new Error(`Text not found on page: "${expected}"`);
           });
           return `Text present: "${expected}"`;
@@ -229,7 +536,7 @@ server.registerTool(
           if (!ok) throw new Error(`URL "${url}" does not match "${expected}"`);
           return `URL matches "${expected}"`;
         }
-        await s.page.locator(expected).first().waitFor({ state: "visible", timeout: 5000 }).catch(() => {
+        await s.page.locator(expected).first().waitFor({ state: "visible", timeout: ASSERT_TIMEOUT_MS }).catch(() => {
           throw new Error(`Element not visible: ${expected}`);
         });
         return `Element visible: ${expected}`;

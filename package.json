@@ -4,13 +4,16 @@
   "description": "Local-first MCP server that acts as an autonomous QA engineer with screenshot evidence",
   "type": "module",
   "main": "dist/server.js",
-  "bin": { "qa-agent-mcp": "dist/server.js" },
+  "bin": {
+    "qa-agent-mcp": "dist/server.js"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server.js",
     "dev": "bun run src/server.ts",
     "typecheck": "tsc --noEmit",
-    "install:browser": "playwright install chromium"
+    "install:browser": "playwright install chromium",
+    "test": "npm run build && node --test --test-timeout=120000 test/"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",

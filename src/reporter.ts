@@ -1,9 +1,32 @@
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { QASession, StepResult } from "./state.js";
+import type { ApiRecord, QASession, StepResult } from "./state.js";
 
 const esc = (s: string) => s.replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
 const badge = (s: StepResult["status"]) => (s === "pass" ? "✅ PASS" : "❌ FAIL");
+
+const fence = (lang: string, body: string) => ["```" + lang, body, "```", ""];
+const headerBlock = (h: Record<string, string>) =>
+  Object.entries(h).map(([k, v]) => `${k}: ${v}`).join("\n") || "(none)";
+
+function renderApi(a: ApiRecord): string[] {
+  const out: string[] = [];
+  out.push(`- **Request:** \`${a.method} ${a.url}\``);
+  out.push(`- **Response:** \`${a.status} ${a.statusText}\` in ${a.durationMs}ms`);
+  if (a.saved.length) out.push(`- **Saved variables:** ${a.saved.map((n) => `\`${n}\``).join(", ")}`);
+  out.push("");
+  if (a.note) out.push(`> ${a.note.replace(/\r?\n/g, " ")}`, "");
+  if (a.reportDetail === "full") {
+    out.push("<details><summary>Request details</summary>", "");
+    out.push("**Headers**", "", ...fence("http", headerBlock(a.requestHeaders)));
+    if (a.requestBody) out.push("**Body**", "", ...fence("json", a.requestBody));
+    out.push("</details>", "", "<details open><summary>Response details</summary>", "");
+    out.push("**Headers**", "", ...fence("http", headerBlock(a.responseHeaders)));
+    if (a.responseBody) out.push(`**Body**${a.truncated ? " _(truncated)_" : ""}`, "", ...fence("json", a.responseBody));
+    out.push("</details>", "");
+  }
+  return out;
+}
 
 export async function writeReport(session: QASession, summaryNotes?: string): Promise<string> {
   const finishedAt = new Date();
@@ -19,6 +42,8 @@ export async function writeReport(session: QASession, summaryNotes?: string): Pr
   lines.push(`**Started:** ${session.startedAt.toISOString()}  `);
   lines.push(`**Finished:** ${finishedAt.toISOString()}  `);
   lines.push(`**Steps:** ${steps.length} (${passed} passed, ${failed.length} failed)  `);
+  const issueCount = steps.reduce((n, s) => n + s.issues.length, 0);
+  if (issueCount) lines.push(`**Browser issues:** ${issueCount} console error/failed-request events (see steps below)  `);
   lines.push(`**Total step time:** ${(totalMs / 1000).toFixed(2)}s`, "");
 
   if (summaryNotes) lines.push("## Summary", "", summaryNotes, "");
@@ -42,8 +67,18 @@ export async function writeReport(session: QASession, summaryNotes?: string): Pr
     if (s.detail) lines.push(`- **Detail:** ${s.detail}`);
     lines.push("");
     if (s.error) lines.push("```text", s.error, "```", "");
+    if (s.diagnostics) {
+      lines.push(
+        `- **Diagnostics:** [console log](${s.diagnostics.console}) · [accessibility tree](${s.diagnostics.aria})`,
+        "",
+      );
+    }
+    if (s.issues.length) {
+      lines.push("<details><summary>Browser issues (" + s.issues.length + ")</summary>", "", "```text", ...s.issues, "```", "", "</details>", "");
+    }
+    if (s.api) lines.push(...renderApi(s.api));
     if (s.screenshot) lines.push(`![Step ${s.step}](${s.screenshot})`, "");
-    else lines.push("_Screenshot unavailable._", "");
+    else if (!s.api) lines.push("_Screenshot unavailable._", "");
   }
 
   const file = path.join(session.dir, "README.md");
