@@ -58,6 +58,16 @@ before(async () => {
       });
       return;
     }
+    const html = (body) => res.writeHead(200, { "Content-Type": "text/html" }).end(`<!doctype html><title>t</title>${body}`);
+    if (req.url === "/tabs")
+      return html('<h1>Tabs Home</h1><a id="blank" href="/popup" target="_blank">Open popup</a><button id="winopen" onclick="window.open(\'/popup2\')">window.open</button>');
+    if (req.url === "/popup") return html("<h1>Popup One</h1>");
+    if (req.url === "/popup2") return html('<h1>Popup Two</h1><button id="closeme" onclick="window.close()">close me</button>');
+    if (req.url === "/dialogs")
+      return html(`<h1>Dialogs</h1><p id="r"></p>
+        <button id="alert" onclick="alert('Heads up')">alert</button>
+        <button id="confirm" onclick="document.getElementById('r').textContent = confirm('Delete item?') ? 'deleted' : 'kept'">confirm</button>
+        <button id="prompt" onclick="document.getElementById('r').textContent = 'hi ' + prompt('Your name?', 'anon')">prompt</button>`);
     if (req.url === "/me") {
       const authed = /(?:^|;\s*)sid=cookie-secret-9/.test(req.headers.cookie ?? "");
       res.writeHead(authed ? 200 : 401, { "Content-Type": "text/html" }).end(authed ? "<h1>Hello session</h1>" : "<h1>Please log in</h1>");
@@ -121,6 +131,7 @@ test("lists all tools", async () => {
   assert.deepEqual(names, [
     "qa_action",
     "qa_assert",
+    "qa_dialog",
     "qa_extract",
     "qa_finish_session",
     "qa_inspect_dom",
@@ -129,6 +140,7 @@ test("lists all tools", async () => {
     "qa_request",
     "qa_save_state",
     "qa_start_session",
+    "qa_tab",
   ]);
 });
 
@@ -463,4 +475,117 @@ test("saved login state: errors are clear and do not kill a running session", { 
   const still = await call("qa_assert", { type: "text_present", expected: "Fixture Form", step_description: "still alive" });
   assert.equal(still.json.status, "pass");
   await call("qa_finish_session", {});
+});
+
+test("tabs: popups auto-switch, list/switch/close/new, self-closing tab", { timeout: 90_000 }, async () => {
+  await call("qa_start_session", { test_name: "tabs" });
+  await call("qa_navigate", { url: `${baseUrl}/tabs`, step_description: "open tabs page" });
+  const pass = async (args, label) => {
+    const r = await call("qa_assert", { step_description: label, ...args });
+    assert.equal(r.json.status, "pass", `${label}: ${r.text}`);
+  };
+
+  // target=_blank link: the step reports the new tab and continues in it
+  const click = await call("qa_action", { action: "click", selector: "#blank", step_description: "open popup" });
+  assert.match(click.json.new_tab, /^#2 http:\/\/127\.0\.0\.1:\d+\/popup/);
+  await pass({ type: "text_present", expected: "Popup One" }, "now on popup");
+  let list = (await call("qa_tab", { action: "list" })).json.tabs;
+  assert.equal(list.length, 2);
+  assert.deepEqual(list.map((t) => t.current), [false, true]);
+
+  // switch back and forth; text on the other tab is not visible
+  assert.equal((await call("qa_tab", { action: "switch", index: 1 })).json.status, "pass");
+  await pass({ type: "text_present", expected: "Tabs Home" }, "back on tab 1");
+  const absent = await call("qa_assert", { type: "text_present", expected: "Popup One", step_description: "popup text not on tab 1" });
+  assert.equal(absent.isError, true);
+
+  // close the popup tab (index 2) while on tab 1: stays on 1
+  const closed = await call("qa_tab", { action: "close", index: 2 });
+  assert.equal(closed.json.status, "pass", closed.text);
+  assert.match(closed.json.detail, /Current tab is now #1/);
+  assert.equal((await call("qa_tab", { action: "list" })).json.tabs.length, 1);
+  const last = await call("qa_tab", { action: "close" });
+  assert.equal(last.isError, true);
+  assert.match(last.json.error, /Cannot close the last tab/);
+
+  // new tab with url becomes current
+  const nt = await call("qa_tab", { action: "new", url: `${baseUrl}/form` });
+  assert.equal(nt.json.status, "pass", nt.text);
+  await pass({ type: "text_present", expected: "Fixture Form" }, "new tab loaded");
+  assert.equal((await call("qa_tab", { action: "list" })).json.tabs.length, 2);
+
+  // window.open from tab 1, then the popup closes itself
+  await call("qa_tab", { action: "switch", index: 1 });
+  const wo = await call("qa_action", { action: "click", selector: "#winopen", step_description: "window.open" });
+  assert.match(wo.json.new_tab, /^#3 .*\/popup2/);
+  await pass({ type: "text_present", expected: "Popup Two" }, "on popup two");
+  const selfClose = await call("qa_action", { action: "click", selector: "#closeme", step_description: "popup closes itself" });
+  assert.equal(selfClose.json.status, "pass", selfClose.text);
+  assert.equal((await call("qa_tab", { action: "list" })).json.tabs.length, 2);
+  await pass({ type: "text_present", expected: "Fixture Form" }, "fell back to previous tab");
+
+  const badIndex = await call("qa_tab", { action: "switch", index: 99 });
+  assert.equal(badIndex.isError, true);
+  assert.match(badIndex.json.error, /No tab #99/);
+  assert.equal((await call("qa_tab", { action: "switch" })).isError, true);
+
+  const fin = await call("qa_finish_session", {});
+  const readme = readFileSync(fin.json.report, "utf8");
+  assert.match(readme, /\*\*New tab:\*\* #2 /);
+  assert.match(readme, /\*\*New tab:\*\* #3 /);
+});
+
+test("dialogs: dismissed by default, accept once/persist, prompt text, dialog_shown", { timeout: 90_000 }, async () => {
+  await call("qa_start_session", { test_name: "dialogs" });
+  await call("qa_navigate", { url: `${baseUrl}/dialogs`, step_description: "open dialogs page" });
+  const click = (id) => call("qa_action", { action: "click", selector: id, step_description: `click ${id}` });
+  const shows = async (expected) => {
+    const r = await call("qa_assert", { type: "text_present", expected, step_description: `shows ${expected}` });
+    assert.equal(r.json.status, "pass", r.text);
+  };
+
+  // Default: dismissed, but recorded and hinted
+  const d1 = await click("#confirm");
+  assert.deepEqual(d1.json.dialogs, ['confirm "Delete item?" -> dismissed']);
+  assert.match(d1.json.hint, /qa_dialog action=accept/);
+  await shows("kept");
+
+  // accept applies to the next dialog only
+  assert.equal((await call("qa_dialog", { action: "accept" })).json.status, "pass");
+  const d2 = await click("#confirm");
+  assert.deepEqual(d2.json.dialogs, ['confirm "Delete item?" -> accepted']);
+  await shows("deleted");
+  await click("#confirm");
+  await shows("kept");
+
+  // persist keeps it
+  await call("qa_dialog", { action: "accept", persist: true });
+  await click("#confirm");
+  await shows("deleted");
+  await call("qa_action", { action: "hover", selector: "h1", step_description: "reset marker" });
+  await click("#confirm");
+  await shows("deleted");
+
+  // prompt with text and a placeholder
+  await call("qa_dialog", { action: "accept", prompt_text: "Ana-{{rand}}" });
+  const p = await click("#prompt");
+  assert.deepEqual(p.json.dialogs, ['prompt "Your name?" -> accepted']);
+  await shows("hi Ana-{{rand}}");
+
+  // dialog_shown: alert message is not in the DOM, so this is the only way to verify it
+  await call("qa_dialog", { action: "dismiss", persist: true });
+  await click("#alert");
+  const seen = await call("qa_assert", { type: "dialog_shown", expected: "Heads up", step_description: "alert shown" });
+  assert.equal(seen.json.status, "pass", seen.text);
+  assert.match(seen.json.detail, /alert "Heads up"/);
+  const again = await call("qa_assert", { type: "dialog_shown", expected: "Heads up", step_description: "already consumed" });
+  assert.equal(again.isError, true);
+  const never = await call("qa_assert", { type: "dialog_shown", expected: "Never shown", step_description: "absent" });
+  assert.equal(never.isError, true);
+  assert.match(never.json.error, /No dialog containing "Never shown" appeared\. Unchecked dialogs: confirm/);
+
+  const fin = await call("qa_finish_session", {});
+  const readme = readFileSync(fin.json.report, "utf8");
+  assert.match(readme, /\*\*Dialog:\*\* confirm "Delete item\?" -> dismissed/);
+  assert.match(readme, /\*\*Dialog:\*\* confirm "Delete item\?" -> accepted/);
 });

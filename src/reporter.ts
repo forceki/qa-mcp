@@ -74,6 +74,8 @@ export async function writeReport(session: QASession, summaryNotes?: string): Pr
         "",
       );
     }
+    if (s.newTab) lines.push(`- **New tab:** ${s.newTab} (switched to it)`, "");
+    if (s.dialogs?.length) lines.push(...s.dialogs.map((d) => `- **Dialog:** ${d}`), "");
     if (s.issues.length) {
       lines.push("<details><summary>Browser issues (" + s.issues.length + ")</summary>", "", "```text", ...s.issues, "```", "", "</details>", "");
     }

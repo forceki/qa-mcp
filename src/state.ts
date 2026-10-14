@@ -40,11 +40,37 @@ export interface StepResult {
   /** Extra evidence files (relative to the run dir), only written for failed steps. */
   diagnostics?: { console: string; aria: string };
   api?: ApiRecord;
+  /** JS dialogs (alert/confirm/prompt/beforeunload) that appeared during this step and how they were answered. */
+  dialogs?: string[];
+  /** Set when this step opened a new tab; the session switched to it automatically. */
+  newTab?: string;
 }
+
+export interface DialogRecord {
+  type: string;
+  message: string;
+  defaultValue: string;
+  outcome: "accepted" | "dismissed";
+  tab: number;
+  /** True once matched by a dialog_shown assertion. */
+  consumed: boolean;
+}
+
+export interface DialogPolicy {
+  action: "accept" | "dismiss";
+  promptText?: string;
+  /** false = applies to the next dialog only, then reverts to the default (dismiss). */
+  persist: boolean;
+}
+
+const describeDialog = (d: DialogRecord) =>
+  `${d.type} "${d.message.length > 120 ? d.message.slice(0, 120) + "…" : d.message}" -> ${d.outcome}`;
 
 const MAX_EVENTS = 500;
 export const num = (v: string | undefined, d: number) => (v && Number(v) > 0 ? Number(v) : d);
 export const REQUEST_TIMEOUT_MS = num(process.env.QA_NAV_TIMEOUT_MS, 30_000);
+/** After click-like actions, wait this long for a popup/new tab to be reported (0 disables). */
+export const POPUP_WAIT_MS = process.env.QA_POPUP_WAIT_MS !== undefined ? Math.max(0, Number(process.env.QA_POPUP_WAIT_MS) || 0) : 300;
 export const ASSERT_TIMEOUT_MS = num(process.env.QA_ASSERT_TIMEOUT_MS, 5_000);
 
 export const BROWSER_ARGS = [
@@ -133,7 +159,12 @@ export class QASession {
   private events: { issue: boolean; text: string }[] = [];
   private browser: Browser;
   private context: BrowserContext;
-  readonly page: Page;
+  private pages: Page[] = [];
+  private current: Page;
+  /** Tabs opened since the current step started (popups, target=_blank, window.open). */
+  private pendingNew: Page[] = [];
+  readonly dialogs: DialogRecord[] = [];
+  private dialogPolicy: DialogPolicy | null = null;
 
   private constructor(
     testName: string,
@@ -147,8 +178,94 @@ export class QASession {
     this.startedAt = new Date();
     this.browser = browser;
     this.context = context;
-    this.page = page;
+    this.current = page;
+    this.registerPage(page);
+    context.on("page", (p) => {
+      this.registerPage(p);
+      this.pendingNew.push(p);
+    });
+  }
+
+  /** The tab all tools act on. Switches automatically to tabs opened by a step; see qa_tab. */
+  get page(): Page {
+    if (this.current.isClosed()) {
+      // The tab closed itself (window.close()) before its close event ran: fall back to the previous tab.
+      this.removePage(this.current);
+      if (this.current.isClosed()) throw new Error("No open tab. Open one with qa_tab action=new.");
+    }
+    return this.current;
+  }
+
+  get tabs(): Page[] {
+    return [...this.pages];
+  }
+
+  /** 1-based position of the current tab in `tabs`. */
+  get currentTabIndex(): number {
+    return this.pages.indexOf(this.page) + 1;
+  }
+
+  private registerPage(page: Page): void {
+    this.pages.push(page);
     this.attachListeners(page);
+    page.on("close", () => this.removePage(page));
+    page.on("dialog", (d) => {
+      const policy = this.dialogPolicy;
+      const accept = policy?.action === "accept";
+      this.dialogs.push({
+        type: d.type(),
+        message: d.message(),
+        defaultValue: d.defaultValue(),
+        outcome: accept ? "accepted" : "dismissed",
+        tab: this.pages.indexOf(page) + 1,
+        consumed: false,
+      });
+      this.record(`dialog.${d.type()}: ${d.message()} -> ${accept ? "accepted" : "dismissed"}`, false);
+      if (policy && !policy.persist) this.dialogPolicy = null;
+      (accept ? d.accept(policy?.promptText) : d.dismiss()).catch(() => {});
+    });
+  }
+
+  private removePage(page: Page): void {
+    const i = this.pages.indexOf(page);
+    if (i === -1) return;
+    this.pages.splice(i, 1);
+    if (this.current === page && this.pages.length) this.current = this.pages[Math.max(0, i - 1)];
+  }
+
+  async openTab(url?: string): Promise<Page> {
+    const page = await this.context.newPage();
+    this.current = page;
+    if (url) await page.goto(url, { waitUntil: "domcontentloaded" });
+    return page;
+  }
+
+  switchTab(index: number): Page {
+    const page = this.pages[index - 1];
+    if (!page) throw new Error(`No tab #${index}. Open tabs: ${this.pages.length} (use qa_tab action=list).`);
+    this.current = page;
+    return page;
+  }
+
+  /** Closes a tab (default: current). The last remaining tab cannot be closed. */
+  async closeTab(index?: number): Promise<void> {
+    if (this.pages.length <= 1) throw new Error("Cannot close the last tab.");
+    const target = index === undefined ? this.page : this.pages[index - 1];
+    if (!target) throw new Error(`No tab #${index}. Open tabs: ${this.pages.length}.`);
+    await target.close();
+    this.removePage(target);
+  }
+
+  /** Arms how the next dialog(s) are answered. With no policy, dialogs are dismissed (Playwright's default). */
+  setDialogPolicy(policy: DialogPolicy): void {
+    this.dialogPolicy = policy;
+  }
+
+  /** Marks the first not-yet-asserted dialog whose message contains `text`. */
+  consumeDialog(text: string): DialogRecord | undefined {
+    const d = this.dialogs.find((x) => !x.consumed && x.message.includes(text));
+    if (d) d.consumed = true;
+    return d;
   }
 
   private record(text: string, issue: boolean): void {
@@ -196,9 +313,9 @@ export class QASession {
           ...(httpCredentials ? { httpCredentials } : {}),
           ...(storageStatePath ? { storageState: storageStatePath } : {}),
         });
+        context.setDefaultTimeout(num(process.env.QA_TIMEOUT_MS, 10_000));
+        context.setDefaultNavigationTimeout(num(process.env.QA_NAV_TIMEOUT_MS, 30_000));
         const page = await context.newPage();
-        page.setDefaultTimeout(num(process.env.QA_TIMEOUT_MS, 10_000));
-        page.setDefaultNavigationTimeout(num(process.env.QA_NAV_TIMEOUT_MS, 30_000));
         const session = new QASession(testName, dir, browser, context, page);
         session.loadedState = loadedState;
         return session;
@@ -242,13 +359,15 @@ export class QASession {
     kind: string,
     description: string,
     fn: () => Promise<string | void>,
-    opts: { evidence?: boolean } = {},
+    opts: { evidence?: boolean; watchPopups?: boolean } = {},
   ): Promise<StepResult> {
     const evidence = opts.evidence !== false; // false for API-only steps: no page screenshot/diagnostics
     const step = ++this.stepCounter;
     const startedAt = new Date();
     const t0 = performance.now();
     const eventStart = this.events.length;
+    const dialogStart = this.dialogs.length;
+    this.pendingNew = [];
     let status: StepStatus = "pass";
     let detail: string | undefined;
     let error: string | undefined;
@@ -260,13 +379,38 @@ export class QASession {
       error = err instanceof Error ? err.message : String(err);
     }
 
+    // The browser reports a popup slightly after the click that caused it returns.
+    if (opts.watchPopups && POPUP_WAIT_MS > 0 && !this.pendingNew.length) {
+      await this.context.waitForEvent("page", { timeout: POPUP_WAIT_MS }).catch(() => {});
+    }
+
+    // A step that opened a tab (link target=_blank, window.open) continues in that tab.
+    let newTab: string | undefined;
+    const opened = this.pendingNew.filter((p) => !p.isClosed());
+    if (opened.length) {
+      const tab = opened[opened.length - 1];
+      await tab.waitForLoadState("domcontentloaded", { timeout: 5_000 }).catch(() => {});
+      if (!tab.isClosed()) {
+        this.current = tab;
+        newTab = `#${this.pages.indexOf(tab) + 1} ${tab.url()}`;
+      }
+    }
+
+    let page: Page | null = null;
+    try {
+      page = this.page;
+    } catch {
+      // every tab was closed
+    }
+
     const durationMs = Math.round(performance.now() - t0);
     const file = `step-${step}.png`;
     let screenshot: string | null = evidence ? file : null;
     try {
       if (!evidence) throw new Error("no page evidence for this step");
       // Full-page capture on failure so the whole page is available for diagnosis.
-      await this.page.screenshot({ path: path.join(this.dir, file), fullPage: status === "fail", timeout: 10_000 });
+      if (!page) throw new Error("no open tab");
+      await page.screenshot({ path: path.join(this.dir, file), fullPage: status === "fail", timeout: 10_000 });
     } catch {
       screenshot = null;
     }
@@ -276,9 +420,7 @@ export class QASession {
       const consoleFile = `step-${step}-console.txt`;
       const ariaFile = `step-${step}-aria.yml`;
       const log = this.events.map((e) => e.text).join("\n") || "(no console output captured)";
-      const aria = await this.page
-        .locator("body")
-        .ariaSnapshot({ timeout: 3_000 })
+      const aria = await (page ? page.locator("body").ariaSnapshot({ timeout: 3_000 }) : Promise.reject(new Error("no open tab")))
         .catch((e) => `# accessibility snapshot unavailable: ${e instanceof Error ? e.message : e}`);
       await writeFile(path.join(this.dir, consoleFile), log + "\n", "utf8").catch(() => {});
       await writeFile(path.join(this.dir, ariaFile), aria + "\n", "utf8").catch(() => {});
@@ -292,12 +434,14 @@ export class QASession {
       status,
       durationMs,
       screenshot,
-      url: this.page.url(),
+      url: page?.url() ?? "(no open tab)",
       startedAt: startedAt.toISOString(),
       detail,
       error,
       issues: this.events.slice(eventStart).filter((e) => e.issue).map((e) => e.text),
       diagnostics,
+      dialogs: this.dialogs.slice(dialogStart).map(describeDialog),
+      newTab,
     };
     this.steps.push(result);
     return result;

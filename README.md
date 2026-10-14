@@ -63,6 +63,31 @@ claude mcp add qa-agent -s user \
 - For the app's own login form, use `{{env:NAME}}` placeholders in `qa_action` values, e.g. `fill #password` with `{{env:QA_APP_PASS}}`. The report records only "Filled #password", never the value.
 - Screenshots still show non-masked fields, so use a dedicated test account and keep `evidence/` out of git.
 
+## Tabs and dialogs
+
+**Tabs.** All tools act on the *current* tab. When a step opens a new tab (a `target="_blank"` link or `window.open`), the session switches to it automatically and says so in the step result and report (`New tab: #2 https://...`). Use `qa_tab` to move around:
+
+| Action | Effect |
+|--------|--------|
+| `list` | Shows each tab's index, URL, title and which one is current (not a report step) |
+| `new` | Opens a tab, optionally at a `url`, and makes it current |
+| `switch` | Makes tab `index` current |
+| `close` | Closes tab `index` (default: current); the last tab can't be closed |
+
+Indexes are 1-based positions in the list and shift when a tab closes. If a tab closes itself (`window.close()`), the session falls back to the previous tab.
+
+**Dialogs.** Browsers block the page while an `alert`, `confirm` or `prompt` is open, so the answer must be decided *before* the action that triggers it:
+
+```
+1. qa_dialog action=accept                       # next dialog only
+2. qa_action click "#delete"                     # confirm("Delete item?") -> accepted
+3. qa_assert dialog_shown "Delete item?"         # the message isn't in the DOM, so this is the way to check it
+```
+
+- With no `qa_dialog`, dialogs are **dismissed** (`confirm` returns false), the same as Playwright's default. The step result and report always list every dialog and how it was answered, and the step result adds a hint when one was dismissed.
+- `persist: true` keeps the choice for all later dialogs; otherwise it reverts to dismiss after one.
+- `prompt_text` fills a `prompt()`; it supports `{{var:...}}` / `{{rand}}` placeholders.
+
 ## Saved login (log in once, reuse everywhere)
 
 Logging in through the UI on every run is slow and flaky. Do it once, save it, and start later sessions already logged in:
@@ -136,12 +161,14 @@ Or drive it ad hoc:
 | `qa_start_session(test_name, load_state?, basic_auth_*?)` | Creates `evidence/<name>-<timestamp>/`, launches the browser, resets the step counter. `load_state` starts already logged in |
 | `qa_navigate(url, step_description)` | Goes to a URL (waits for `domcontentloaded`), screenshots it |
 | `qa_action(action, selector, value?, step_description)` | `click`, `dblclick`, `hover`, `scroll`, `check`, `uncheck`, `fill`, `press`, `select`, `upload` on a selector, then screenshots |
+| `qa_tab(action, index?, url?)` | `list`, `new`, `switch`, `close` browser tabs. A step that opens a tab (target=_blank, window.open) switches to it automatically |
+| `qa_dialog(action, prompt_text?, persist?)` | Choose how the next JS dialog (alert/confirm/prompt) is answered: `accept` or `dismiss` |
 | `qa_save_state(name)` | Saves the current login (cookies, localStorage, IndexedDB) under a name for later sessions |
 | `qa_list_states()` | Lists saved logins with age, cookie count and domains |
 | `qa_extract(source, selector?, save_as, ...)` | Reads text, input value, attribute, element count, URL or title from the page (optionally through a regex) and saves it as `{{var:NAME}}` |
 | `qa_request(method, url, headers?, body?, expect_*?, save?, ...)` | HTTP API call sharing the browser's cookies and Basic Auth; asserts status/body/JSON, saves response fields as variables, and is recorded in the report |
 | `qa_inspect_dom()` | Returns the accessibility tree plus interactive elements, for fixing broken selectors |
-| `qa_assert(type, expected, step_description)` | `text_present`, `url_matches` (substring or `/regex/`), or `element_visible` |
+| `qa_assert(type, expected, step_description)` | `text_present`, `url_matches` (substring or `/regex/`), `element_visible`, or `dialog_shown` (a JS dialog containing the text appeared) |
 | `qa_finish_session(summary_notes?)` | Closes the browser, writes `README.md`, returns the report path |
 
 A failed action or assertion is recorded as a FAIL step. The tool returns an error with a hint to call `qa_inspect_dom` and retry with a better selector.
@@ -162,6 +189,7 @@ A failed action or assertion is recorded as a FAIL step. The tool returns an err
 | `QA_NAV_TIMEOUT_MS` | `30000` | Navigation timeout |
 | `QA_ASSERT_TIMEOUT_MS` | `5000` | How long assertions wait for text/elements |
 | `QA_BASIC_AUTH_USER` / `QA_BASIC_AUTH_PASS` | unset | HTTP Basic Auth for every session |
+| `QA_POPUP_WAIT_MS` | `300` | How long click-type actions wait for a new tab to be reported (0 disables) |
 | `QA_STATE_DIR` | `~/.qa-agent/states` | Where saved login states are stored |
 
 The browser is launched headless with `--disable-gpu --no-sandbox --disable-dev-shm-usage --js-flags=--max-old-space-size=128`.

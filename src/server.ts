@@ -120,6 +120,8 @@ function stepResponse(r: StepResult, dir: string): ToolResult {
     screenshot: r.screenshot ? path.join(dir, r.screenshot) : null,
     detail: r.detail,
     error: r.error,
+    new_tab: r.newTab ? `${r.newTab} (now the current tab; use qa_tab to switch back)` : undefined,
+    dialogs: r.dialogs?.length ? r.dialogs : undefined,
     browser_issues: r.issues.length ? r.issues.slice(0, 10) : undefined,
     diagnostics: r.diagnostics
       ? { console: path.join(dir, r.diagnostics.console), aria: path.join(dir, r.diagnostics.aria) }
@@ -133,8 +135,11 @@ function stepResponse(r: StepResult, dir: string): ToolResult {
           saved_variables: r.api.saved.length ? r.api.saved : undefined,
         }
       : undefined,
-    hint:
-      r.status === "fail" && !r.api ? "Call qa_inspect_dom to find a working selector, then retry." : undefined,
+    hint: r.dialogs?.some((d) => d.endsWith("-> dismissed"))
+      ? "A dialog was dismissed (the default). Call qa_dialog action=accept BEFORE the triggering action to accept it."
+      : r.status === "fail" && !r.api
+        ? "Call qa_inspect_dom to find a working selector, then retry."
+        : undefined,
   };
   return text(JSON.stringify(payload, null, 2), r.status === "fail");
 }
@@ -249,6 +254,95 @@ server.registerTool(
 );
 
 server.registerTool(
+  "qa_dialog",
+  {
+    description:
+      "Decide how JavaScript dialogs (alert, confirm, prompt, beforeunload) are answered. Call it BEFORE the action that opens the dialog. " +
+      "Without it, dialogs are dismissed (confirm returns false). By default the choice applies to the next dialog only; set persist=true to keep it. " +
+      "Every dialog is recorded in the step result and report; verify one with qa_assert type=dialog_shown.",
+    inputSchema: {
+      action: z.enum(["accept", "dismiss"]),
+      prompt_text: z.string().optional().describe("Text to type into a prompt() dialog when accepting. Supports placeholders."),
+      persist: z.boolean().default(false).describe("false = next dialog only; true = until changed"),
+      step_description: z.string().optional(),
+    },
+  },
+  async ({ action, prompt_text, persist, step_description }) => {
+    try {
+      const s = requireSession();
+      const r = await s.runStep(
+        "dialog_policy",
+        step_description ?? `${action === "accept" ? "Accept" : "Dismiss"} ${persist ? "all" : "the next"} dialog${persist ? "s" : ""}`,
+        async () => {
+          s.setDialogPolicy({ action, promptText: prompt_text === undefined ? undefined : resolve(prompt_text, s), persist });
+          return `Dialogs will be ${action === "accept" ? "accepted" : "dismissed"} (${persist ? "until changed" : "next dialog only"})`;
+        },
+        { evidence: false },
+      );
+      return stepResponse(r, s.dir);
+    } catch (err) {
+      return fromError(err);
+    }
+  },
+);
+
+server.registerTool(
+  "qa_tab",
+  {
+    description:
+      "Manage browser tabs. All tools act on the current tab. A step that opens a new tab (target=_blank link, window.open) switches to it automatically and says so in its result. " +
+      "Actions: list (no step; shows index, url, title, current), new (optional url), switch (index), close (index, default current; the last tab can't be closed). " +
+      "Indexes are 1-based positions in the list and shift when tabs close.",
+    inputSchema: {
+      action: z.enum(["list", "new", "switch", "close"]),
+      index: z.number().int().min(1).optional(),
+      url: z.string().optional().describe("For action=new. Supports placeholders."),
+      step_description: z.string().optional(),
+    },
+  },
+  async ({ action, index, url, step_description }) => {
+    try {
+      const s = requireSession();
+      if (action === "list") {
+        const current = s.currentTabIndex;
+        const tabs = await Promise.all(
+          s.tabs.map(async (t, i) => ({
+            index: i + 1,
+            current: i + 1 === current,
+            url: t.url(),
+            title: await t.title().catch(() => ""),
+          })),
+        );
+        return text(JSON.stringify({ tabs }, null, 2));
+      }
+      const label = { new: "Open new tab", switch: `Switch to tab #${index}`, close: `Close tab #${index ?? "current"}` }[action];
+      const r = await s.runStep(
+        `tab_${action}`,
+        step_description ?? label,
+        async () => {
+          if (action === "new") {
+            const target = url ? new URL(resolve(url, s)).toString() : undefined;
+            const t = await s.openTab(target);
+            return `Opened tab #${s.tabs.indexOf(t) + 1}${target ? ` at ${target}` : ""}`;
+          }
+          if (action === "switch") {
+            if (index === undefined) throw new Error('"index" is required for action "switch".');
+            const t = s.switchTab(index);
+            await t.bringToFront().catch(() => {});
+            return `Switched to tab #${index}: ${t.url()}`;
+          }
+          await s.closeTab(index);
+          return `Closed tab. Current tab is now #${s.currentTabIndex}: ${s.page.url()}`;
+        },
+      );
+      return stepResponse(r, s.dir);
+    } catch (err) {
+      return fromError(err);
+    }
+  },
+);
+
+server.registerTool(
   "qa_navigate",
   {
     description:
@@ -333,7 +427,7 @@ server.registerTool(
             await loc.setInputFiles(resolved);
             return `Uploaded ${resolved} to ${selector}`;
         }
-      });
+      }, { watchPopups: action === "click" || action === "dblclick" || action === "press" });
       return stepResponse(r, s.dir);
     } catch (err) {
       return fromError(err);
@@ -581,9 +675,9 @@ server.registerTool(
   "qa_assert",
   {
     description:
-      "Validate an assertion (text_present | url_matches | element_visible) and capture a screenshot. url_matches accepts a substring, or a regex written as /pattern/. A failed assertion is recorded as a failed step.",
+      "Validate an assertion (text_present | url_matches | element_visible | dialog_shown; dialog_shown checks a JS alert/confirm/prompt whose message contains `expected` appeared since the last check) and capture a screenshot. url_matches accepts a substring, or a regex written as /pattern/. A failed assertion is recorded as a failed step.",
     inputSchema: {
-      type: z.enum(["text_present", "url_matches", "element_visible"]),
+      type: z.enum(["text_present", "url_matches", "element_visible", "dialog_shown"]),
       expected: z.string().min(1),
       step_description: z.string().min(1),
     },
@@ -606,6 +700,17 @@ server.registerTool(
           const ok = m ? new RegExp(m[1], m[2]).test(url) : url.includes(expected);
           if (!ok) throw new Error(`URL "${url}" does not match "${expected}"`);
           return `URL matches "${expected}"`;
+        }
+        if (type === "dialog_shown") {
+          const deadline = Date.now() + ASSERT_TIMEOUT_MS;
+          for (;;) {
+            const d = s.consumeDialog(expected);
+            if (d) return `Dialog shown: ${d.type} "${d.message}" (${d.outcome})`;
+            if (Date.now() >= deadline) break;
+            await new Promise((r) => setTimeout(r, 100));
+          }
+          const seen = s.dialogs.filter((x) => !x.consumed).map((x) => `${x.type} "${x.message}"`);
+          throw new Error(`No dialog containing "${s.mask(expected)}" appeared. Unchecked dialogs: ${seen.length ? seen.join("; ") : "none"}`);
         }
         await s.page.locator(expected).first().waitFor({ state: "visible", timeout: ASSERT_TIMEOUT_MS }).catch(() => {
           throw new Error(`Element not visible: ${expected}`);
