@@ -60,6 +60,33 @@ function deepResolve(x: unknown, s: QASession): unknown {
   return x;
 }
 
+/**
+ * Element refs from qa_snapshot (e.g. "e7", or "f1e2" inside an iframe) can be used anywhere a selector is accepted,
+ * written as "ref=e7" or bare. Playwright resolves them through its "aria-ref=" selector engine.
+ */
+const REF_RE = /^(?:aria-ref=|ref=)?((?:f\d+)?e\d+)$/;
+const isRef = (sel: string) => REF_RE.test(sel);
+const toSelector = (sel: string) => {
+  const m = sel.match(REF_RE);
+  return m ? `aria-ref=${m[1]}` : sel;
+};
+
+/** Adds a "take a new snapshot" hint when a ref-based action fails (refs only exist for the latest snapshot of the current tab). */
+async function refAware<T>(sel: string | undefined, fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    if (sel && isRef(sel)) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(
+        `${msg}\nRef "${sel}" was not found or is stale. Refs only work for elements in the latest qa_snapshot of the CURRENT tab; ` +
+          `take a new qa_snapshot (the page may have changed, or you switched tabs) and use a fresh ref.`,
+      );
+    }
+    throw err;
+  }
+}
+
 const SENSITIVE_KEY = /pass(word)?|token|secret|authorization|api[-_]?key|cookie|session/i;
 
 function redactHeaders(h: Record<string, string>): Record<string, string> {
@@ -138,7 +165,7 @@ function stepResponse(r: StepResult, dir: string): ToolResult {
     hint: r.dialogs?.some((d) => d.endsWith("-> dismissed"))
       ? "A dialog was dismissed (the default). Call qa_dialog action=accept BEFORE the triggering action to accept it."
       : r.status === "fail" && !r.api
-        ? "Call qa_inspect_dom to find a working selector, then retry."
+        ? "Call qa_snapshot to see the page with element refs (or read the diagnostics aria file), then retry with a ref such as ref=e7."
         : undefined,
   };
   return text(JSON.stringify(payload, null, 2), r.status === "fail");
@@ -377,7 +404,7 @@ server.registerTool(
       "`value` supports {{env:NAME}} placeholders.",
     inputSchema: {
       action: z.enum(["click", "dblclick", "hover", "scroll", "check", "uncheck", "fill", "press", "select", "upload"]),
-      selector: z.string().min(1).describe("Playwright selector (CSS, text=, role=, etc.)"),
+      selector: z.string().min(1).describe("Playwright selector (CSS, text=, role=, ...) or an element ref from qa_snapshot, e.g. ref=e7"),
       value: z.string().optional(),
       step_description: z.string().min(1),
     },
@@ -385,8 +412,9 @@ server.registerTool(
   async ({ action, selector, value, step_description }) => {
     try {
       const s = requireSession();
-      const r = await s.runStep(action, step_description, async () => {
-        const loc = s.page.locator(resolve(selector, s)).first();
+      const sel = resolve(selector, s);
+      const r = await s.runStep(action, step_description, () => refAware(sel, async () => {
+        const loc = s.page.locator(toSelector(sel)).first();
         switch (action) {
           case "click":
             await loc.click();
@@ -427,7 +455,7 @@ server.registerTool(
             await loc.setInputFiles(resolved);
             return `Uploaded ${resolved} to ${selector}`;
         }
-      }, { watchPopups: action === "click" || action === "dblclick" || action === "press" });
+      }), { watchPopups: action === "click" || action === "dblclick" || action === "press" });
       return stepResponse(r, s.dir);
     } catch (err) {
       return fromError(err);
@@ -444,7 +472,7 @@ server.registerTool(
       "Optional `regex` keeps capture group 1 (or the whole match) of the extracted text. Captures a step screenshot.",
     inputSchema: {
       source: z.enum(["text", "value", "attribute", "count", "url", "title"]),
-      selector: z.string().optional().describe("Required for text, value, attribute and count"),
+      selector: z.string().optional().describe("Required for text, value, attribute and count. CSS/Playwright selector or a qa_snapshot ref like ref=e7"),
       attribute: z.string().optional().describe("Attribute name when source = attribute, e.g. href, data-id"),
       regex: z.string().optional().describe("e.g. 'Order #(\\d+)' to pull a number out of a sentence"),
       save_as: z.string().regex(/^[A-Za-z0-9_.-]+$/).describe("Variable name, used later as {{var:NAME}}"),
@@ -461,7 +489,7 @@ server.registerTool(
         else if (source === "title") value = await s.page.title();
         else {
           if (!selector) throw new Error(`"selector" is required for source "${source}".`);
-          const loc = s.page.locator(resolve(selector, s));
+          const loc = s.page.locator(toSelector(resolve(selector, s)));
           if (source === "count") value = String(await loc.count());
           else {
             const first = loc.first();
@@ -619,6 +647,40 @@ server.registerTool(
 );
 
 server.registerTool(
+  "qa_snapshot",
+  {
+    description:
+      "Return the current tab's accessibility tree with a ref like [ref=e7] on each element (iframe content included, refs like f1e2). " +
+      "Use a ref as the `selector` of qa_action / qa_extract / qa_assert element_visible, e.g. selector \"ref=e7\": no CSS guessing. " +
+      "Prefer this over qa_inspect_dom. Refs belong to the latest snapshot of the current tab: after the page changes or you switch tabs, take a new one. " +
+      "Does not create a report step. Secrets are masked.",
+    inputSchema: {
+      depth: z.number().int().min(1).max(50).optional().describe("Limit tree depth to keep the output small"),
+      max_chars: z.number().int().min(500).max(100000).default(15000).describe("Truncate the snapshot after this many characters"),
+    },
+  },
+  async ({ depth, max_chars }) => {
+    try {
+      const s = requireSession();
+      const raw = await s.page.ariaSnapshot({ mode: "ai", ...(depth ? { depth } : {}) });
+      let snap = s.mask(raw);
+      let note = "";
+      if (snap.length > max_chars) {
+        const cut = snap.slice(0, max_chars);
+        snap = cut.slice(0, Math.max(cut.lastIndexOf("\n"), 0) || max_chars);
+        note = `\n… truncated (${raw.length - snap.length} more characters). Use depth, or a larger max_chars.`;
+      }
+      const tabs = s.tabs.length;
+      return text(
+        `url: ${s.page.url()}\ntitle: ${await s.page.title().catch(() => "")}\ntab: #${s.currentTabIndex} of ${tabs}\n\n${snap}${note}`,
+      );
+    } catch (err) {
+      return fromError(err);
+    }
+  },
+);
+
+server.registerTool(
   "qa_inspect_dom",
   {
     description:
@@ -628,7 +690,7 @@ server.registerTool(
   async () => {
     try {
       const s = requireSession();
-      const aria = await s.page.locator("body").ariaSnapshot().catch((e) => `unavailable: ${e}`);
+      const aria = await s.page.ariaSnapshot({ mode: "ai" }).catch((e) => `unavailable: ${e}`);
       const elements = await s.page.evaluate(() => {
         const sel =
           "a[href],button,input,select,textarea,summary,[role=button],[role=link],[role=checkbox],[role=tab],[role=menuitem],[contenteditable=true],[onclick]";
@@ -712,7 +774,7 @@ server.registerTool(
           const seen = s.dialogs.filter((x) => !x.consumed).map((x) => `${x.type} "${x.message}"`);
           throw new Error(`No dialog containing "${s.mask(expected)}" appeared. Unchecked dialogs: ${seen.length ? seen.join("; ") : "none"}`);
         }
-        await s.page.locator(expected).first().waitFor({ state: "visible", timeout: ASSERT_TIMEOUT_MS }).catch(() => {
+        await s.page.locator(toSelector(expected)).first().waitFor({ state: "visible", timeout: ASSERT_TIMEOUT_MS }).catch(() => {
           throw new Error(`Element not visible: ${expected}`);
         });
         return `Element visible: ${expected}`;

@@ -420,7 +420,7 @@ export class QASession {
       const consoleFile = `step-${step}-console.txt`;
       const ariaFile = `step-${step}-aria.yml`;
       const log = this.events.map((e) => e.text).join("\n") || "(no console output captured)";
-      const aria = await (page ? page.locator("body").ariaSnapshot({ timeout: 3_000 }) : Promise.reject(new Error("no open tab")))
+      const aria = await (page ? page.ariaSnapshot({ mode: "ai", timeout: 3_000 }) : Promise.reject(new Error("no open tab")))
         .catch((e) => `# accessibility snapshot unavailable: ${e instanceof Error ? e.message : e}`);
       await writeFile(path.join(this.dir, consoleFile), log + "\n", "utf8").catch(() => {});
       await writeFile(path.join(this.dir, ariaFile), aria + "\n", "utf8").catch(() => {});

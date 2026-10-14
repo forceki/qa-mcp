@@ -61,6 +61,8 @@ before(async () => {
     const html = (body) => res.writeHead(200, { "Content-Type": "text/html" }).end(`<!doctype html><title>t</title>${body}`);
     if (req.url === "/tabs")
       return html('<h1>Tabs Home</h1><a id="blank" href="/popup" target="_blank">Open popup</a><button id="winopen" onclick="window.open(\'/popup2\')">window.open</button>');
+    if (req.url === "/frames") return html('<h1>Frames</h1><p id="r"></p><iframe src="/frame-inner" title="inner"></iframe>');
+    if (req.url === "/frame-inner") return html("<button onclick=\"parent.document.getElementById('r').textContent='framed-click'\">In frame</button>");
     if (req.url === "/popup") return html("<h1>Popup One</h1>");
     if (req.url === "/popup2") return html('<h1>Popup Two</h1><button id="closeme" onclick="window.close()">close me</button>');
     if (req.url === "/dialogs")
@@ -139,6 +141,7 @@ test("lists all tools", async () => {
     "qa_navigate",
     "qa_request",
     "qa_save_state",
+    "qa_snapshot",
     "qa_start_session",
     "qa_tab",
   ]);
@@ -588,4 +591,66 @@ test("dialogs: dismissed by default, accept once/persist, prompt text, dialog_sh
   const readme = readFileSync(fin.json.report, "utf8");
   assert.match(readme, /\*\*Dialog:\*\* confirm "Delete item\?" -> dismissed/);
   assert.match(readme, /\*\*Dialog:\*\* confirm "Delete item\?" -> accepted/);
+});
+
+test("snapshot refs: qa_snapshot, ref selectors, iframes, stale refs", { timeout: 90_000 }, async () => {
+  await call("qa_start_session", { test_name: "refs" });
+  await call("qa_navigate", { url: `${baseUrl}/form`, step_description: "open form" });
+
+  const snap = await client.callTool({ name: "qa_snapshot", arguments: {} });
+  const body = snap.content[0].text;
+  assert.match(body, /^url: http:\/\/127\.0\.0\.1:\d+\/form\ntitle: Fixture\ntab: #1 of 1/);
+  const ref = (re) => {
+    const m = body.match(re);
+    assert.ok(m, `ref for ${re} in snapshot:\n${body}`);
+    return m[1];
+  };
+  const name = ref(/textbox "Your name" \[ref=(e\d+)\]/);
+  const color = ref(/combobox \[ref=(e\d+)\]/);
+  const agree = ref(/checkbox "I agree" \[ref=(e\d+)\]/);
+  const go = ref(/button "Go" \[ref=(e\d+)\]/);
+
+  const ok = async (args) => {
+    const r = await call("qa_action", { step_description: "via ref", ...args });
+    assert.equal(r.json.status, "pass", JSON.stringify(args) + " -> " + r.text);
+  };
+  await ok({ action: "fill", selector: `ref=${name}`, value: "Ana" });          // ref= prefix
+  await ok({ action: "select", selector: color, value: "Blue" });               // bare ref
+  await ok({ action: "check", selector: `aria-ref=${agree}` });                 // aria-ref= form
+  await ok({ action: "click", selector: `ref=${go}` });
+  assert.equal((await call("qa_assert", { type: "text_present", expected: "Hello Ana / Blue / true", step_description: "result" })).json.status, "pass");
+  assert.equal((await call("qa_assert", { type: "element_visible", expected: `ref=${go}`, step_description: "ref visible" })).json.status, "pass");
+  const ex = await call("qa_extract", { source: "value", selector: `ref=${name}`, save_as: "typed", step_description: "extract via ref" });
+  assert.match(ex.json.detail, /"Ana"/);
+
+  // depth + truncation
+  const shallow = (await client.callTool({ name: "qa_snapshot", arguments: { depth: 1 } })).content[0].text;
+  assert.ok(shallow.length < body.length, "depth shrinks the snapshot");
+  const cut = (await client.callTool({ name: "qa_snapshot", arguments: { max_chars: 500 } })).content[0].text;
+  assert.match(await Promise.resolve(cut), /^url: /);
+
+  // iframe content gets refs too
+  await call("qa_navigate", { url: `${baseUrl}/frames`, step_description: "open frames" });
+  const fbody = (await client.callTool({ name: "qa_snapshot", arguments: {} })).content[0].text;
+  const frameBtn = fbody.match(/button "In frame" \[ref=(f\d+e\d+)\]/)?.[1];
+  assert.ok(frameBtn, "iframe button has an f-prefixed ref:\n" + fbody);
+  await ok({ action: "click", selector: `ref=${frameBtn}` });
+  assert.equal((await call("qa_assert", { type: "text_present", expected: "framed-click", step_description: "frame click worked" })).json.status, "pass");
+
+  // stale ref: refs from the previous page don't exist on a new, un-snapshotted page
+  await call("qa_navigate", { url: `${baseUrl}/tabs`, step_description: "different page" });
+  const stale = await call("qa_action", { action: "click", selector: `ref=${go}`, step_description: "stale ref" });
+  assert.equal(stale.isError, true);
+  assert.match(stale.json.error, /was not found or is stale/);
+  assert.match(stale.json.error, /take a new qa_snapshot/);
+  assert.match(stale.json.hint, /qa_snapshot/);
+
+  // a ref-free failure doesn't get the ref hint
+  const plain = await call("qa_action", { action: "click", selector: "#nope", step_description: "plain miss" });
+  assert.ok(!plain.json.error.includes("stale"));
+  // failure diagnostics now carry refs too
+  assert.match(readFileSync(plain.json.diagnostics.aria, "utf8"), /\[ref=(?:f\d+)?e\d+\]/);
+
+  const fin = await call("qa_finish_session", {});
+  assert.equal(fin.json.failed, 2);
 });

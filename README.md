@@ -63,6 +63,33 @@ claude mcp add qa-agent -s user \
 - For the app's own login form, use `{{env:NAME}}` placeholders in `qa_action` values, e.g. `fill #password` with `{{env:QA_APP_PASS}}`. The report records only "Filled #password", never the value.
 - Screenshots still show non-masked fields, so use a dedicated test account and keep `evidence/` out of git.
 
+## Snapshot refs (no selector guessing)
+
+`qa_snapshot` returns the current tab as an accessibility tree and puts a ref on every element:
+
+```
+- textbox "Your name" [ref=e3]
+- combobox [ref=e4]
+- checkbox "I agree" [ref=e6]
+- button "Go" [ref=e7]
+- iframe [ref=e9]:
+  - button "In frame" [ref=f1e2]
+```
+
+Use the ref anywhere a selector is accepted (`qa_action`, `qa_extract`, `qa_assert element_visible`), written as `ref=e7`:
+
+```
+qa_snapshot                                  -> sees: button "Go" [ref=e7]
+qa_action click selector "ref=e7"
+```
+
+Rules:
+- Refs belong to the **latest snapshot of the current tab**. After the page changes or you switch tabs, take a new snapshot. A failed ref action says so in its error.
+- Elements inside iframes get refs like `f1e2` and work the same way.
+- Failed steps write `step-N-aria.yml` with refs too, so Claude can recover from a failure without a separate call.
+- Use `depth` to shrink the output on big pages and `max_chars` to cap it. Secrets are masked.
+- Prefer CSS/role selectors in saved specs, since refs change between runs. Refs are for exploring and one-off flows.
+
 ## Tabs and dialogs
 
 **Tabs.** All tools act on the *current* tab. When a step opens a new tab (a `target="_blank"` link or `window.open`), the session switches to it automatically and says so in the step result and report (`New tab: #2 https://...`). Use `qa_tab` to move around:
@@ -167,6 +194,7 @@ Or drive it ad hoc:
 | `qa_list_states()` | Lists saved logins with age, cookie count and domains |
 | `qa_extract(source, selector?, save_as, ...)` | Reads text, input value, attribute, element count, URL or title from the page (optionally through a regex) and saves it as `{{var:NAME}}` |
 | `qa_request(method, url, headers?, body?, expect_*?, save?, ...)` | HTTP API call sharing the browser's cookies and Basic Auth; asserts status/body/JSON, saves response fields as variables, and is recorded in the report |
+| `qa_snapshot(depth?, max_chars?)` | Accessibility tree with a ref like `[ref=e7]` on every element (iframes included). Use `ref=e7` as a selector, no CSS guessing |
 | `qa_inspect_dom()` | Returns the accessibility tree plus interactive elements, for fixing broken selectors |
 | `qa_assert(type, expected, step_description)` | `text_present`, `url_matches` (substring or `/regex/`), `element_visible`, or `dialog_shown` (a JS dialog containing the text appeared) |
 | `qa_finish_session(summary_notes?)` | Closes the browser, writes `README.md`, returns the report path |
