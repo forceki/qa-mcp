@@ -1,6 +1,6 @@
 # qa-agent
 
-A local-first [MCP](https://modelcontextprotocol.io) server that lets Claude Code act as an autonomous QA engineer. It drives a real Chromium/Chrome browser with Playwright, saves a screenshot for every step, and compiles a visual Markdown report. No cloud services involved.
+A local-first [MCP](https://modelcontextprotocol.io) server that lets an AI coding agent (Claude Code, Codex, Gemini CLI, Cursor, VS Code Copilot, and any other MCP client) act as an autonomous QA engineer. It drives a real Chromium/Chrome browser with Playwright, saves a screenshot for every step, and compiles a visual Markdown report. No cloud services involved.
 
 ```
 result/
@@ -13,7 +13,7 @@ result/
 ## Requirements
 
 - Node.js 20+ (Bun also works for dev)
-- Claude Code (`claude` CLI)
+- An MCP-capable agent: Claude Code, Codex CLI, Gemini CLI, Cursor, VS Code, Claude Desktop, etc.
 - Linux/macOS/Windows with Chromium or Google Chrome
 
 ## Install
@@ -46,6 +46,66 @@ claude mcp list        # qa-agent ... ✔ Connected
 ```
 
 Prefer editing config by hand? Use `claude_desktop_config.json` in this repo as a template, and change the paths to your own.
+
+## Use with other agents
+
+The server is a plain stdio MCP server, so any MCP client can use it. Build first (`npm run build`), then register `node /absolute/path/to/qa-agent/dist/server.js` with `QA_RESULT_DIR` set. Restart the client afterwards.
+
+**Codex CLI**
+
+```bash
+codex mcp add qa-agent \
+  --env QA_RESULT_DIR="$PWD/result" \
+  -- node "$PWD/dist/server.js"
+```
+
+Or in `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.qa-agent]
+command = "node"
+args = ["/absolute/path/to/qa-agent/dist/server.js"]
+env = { QA_RESULT_DIR = "/absolute/path/to/qa-agent/result" }
+```
+
+**Gemini CLI**
+
+```bash
+gemini mcp add qa-agent node "$PWD/dist/server.js" -e QA_RESULT_DIR="$PWD/result"
+```
+
+Or in `~/.gemini/settings.json`:
+
+```json
+{
+  "mcpServers": {
+    "qa-agent": {
+      "command": "node",
+      "args": ["/absolute/path/to/qa-agent/dist/server.js"],
+      "env": { "QA_RESULT_DIR": "/absolute/path/to/qa-agent/result" }
+    }
+  }
+}
+```
+
+**Cursor / Claude Desktop / Windsurf**: use the same JSON block under `mcpServers` in `.cursor/mcp.json`, `claude_desktop_config.json` or the Windsurf MCP config.
+
+**VS Code (Copilot)**: put it in `.vscode/mcp.json` under `servers` instead of `mcpServers`:
+
+```json
+{
+  "servers": {
+    "qa-agent": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["/absolute/path/to/qa-agent/dist/server.js"],
+      "env": { "QA_RESULT_DIR": "/absolute/path/to/qa-agent/result" }
+    }
+  }
+}
+```
+
+The `qa_*` tools work the same in every client. The `skills/` folder is a Claude Code feature. In other agents, paste or reference the `SKILL.md` files from `AGENTS.md` (Codex, Cursor) or `GEMINI.md` (Gemini CLI) to get the same analyze, test-cases, run, explore and report workflow. Only Claude Code has been tested so far.
 
 ## Basic auth + login pages (dev/staging sites)
 
