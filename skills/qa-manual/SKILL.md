@@ -1,6 +1,6 @@
 ---
 name: qa-manual
-description: "Write a user manual (buku manual / panduan pengguna) for a web app or feature: what each feature does and short step-by-step instructions with screenshots, captured with the qa-agent tools and annotated with numbered red boxes, with optional PDF export. Also serves as test documentation (which flows were walked and when). Use when the user asks for a user manual, user guide, manual book, how-to guide, panduan, dokumentasi fitur, or to document how a feature works. Writes qa/<feature>/manual.md."
+description: "Write a user manual (buku manual / panduan pengguna) for a web app or feature: what each feature does and short step-by-step instructions with screenshots, captured with the qa-agent tools and annotated with numbered red boxes, delivered as a PDF in the client's user-manual template format (cover, DAFTAR ISI, I./1./a. sections). Also serves as test documentation (which flows were walked and when). Use when the user asks for a user manual, user guide, manual book, how-to guide, panduan, dokumentasi fitur, or to document how a feature works. Writes qa/<feature>/manual.md and manual-<feature>.pdf."
 ---
 
 # User manual
@@ -22,7 +22,7 @@ For each feature not already covered by a passing run:
 
 ## Annotate the screenshots
 Users follow pictures faster than text, so mark each picture: a red box around the element and a badge with the step number from the text (letters A, B, C for "what you see here" callouts).
-1. Write `qa/<feature>/capture.cjs` that uses `skills/qa-manual/scripts/annotate.cjs` (`launch`, `frameWith`, `labelBox`, `menu`, `shot`). See `qa/permohonan/capture.cjs` for an example. Log in with the saved state (`~/.qa-agent/states/<name>.json`) and write the images to `qa/<feature>/img/`.
+1. Write `qa/<feature>/capture.cjs` that uses `skills/qa-manual/scripts/annotate.cjs` (`launch`, `frameWith`, `labelBox`, `menu`, `shot`). See `skills/qa-manual/scripts/example-capture.cjs` for an example. Log in with the saved state (`~/.qa-agent/states/<name>.json`) and write the images to `qa/<feature>/img/`.
 2. Recreate the screens you already walked. Fill forms but **do not submit** unless the user agrees, so capturing creates no extra data. Mark only steps whose result you saw in the qa-agent run.
 3. Number the badges to match the step numbers in the text exactly. Keep boxes from overlapping: use separate boxes with the same number instead of one huge box.
 4. Look at every image before using it. Re-shoot it if a loader, an open dropdown, a cut-off box or the wrong value shows.
@@ -34,40 +34,51 @@ Users follow pictures faster than text, so mark each picture: a red box around t
 - Skip field-by-field explanations, internal logic, selectors, API details and edge cases. Put at most 2-3 tips or notes per feature.
 - No test jargon (P0, assert, selector) in the user-facing text.
 
-## Write `qa/<feature>/manual.md` (or `qa/manual.md` for the whole app)
+## Write `qa/<feature>/manual.md` in the house format
+The output is a **PDF** in the format of the client's user-manual template ("USER MANUAL IJP PERIODIK & SPLIT ND & WP.docx"): a cover, a DAFTAR ISI page, then numbered sections. Write the Markdown in this shape (the headings are numbered automatically, so do not type numbers):
 ```
-# <App> – Panduan Pengguna
-Versi/build, tanggal, environment
+---
+title: PANDUAN PENGGUNAAN
+subtitle: <APLIKASI> – <MODUL>
+company: PT JAMKRIDA JABAR
+year: <YYYY>
+---
 
-## Daftar Isi
+# Ruang Lingkup                      -> I.
+<Aplikasi ini untuk apa dan untuk siapa.> Panduan ini mencakup hal-hal sebagai berikut :
+## Modul <Nama>                      -> 1.
+### <Fitur 1>                        -> a.  (list each feature covered in section II)
+### <Fitur 2>
+Angka merah pada setiap gambar menunjukkan nomor langkah pada teks.
 
-## 1. Pendahuluan
-Apa aplikasi ini, untuk siapa, cara login, peran (role) jika ada.
-
-## 2. <Fitur>
+# Panduan Penggunaan Modul <Nama>    -> II.
+## <Fitur 1>                         -> 1.
 <1-2 kalimat: fitur ini untuk apa.>
+1. Klik menu **<Menu>**.
+2. Isi **<Field>**, lalu klik **<Tombol>**.
+   - <sub-poin, indent 3 spaces>
+![<alt>](img/<fitur>.png)            (an image may sit between steps; numbering continues after it)
+3. ...
+Jika berhasil, sistem menampilkan pesan "...".
+Hal yang perlu diperhatikan:
+- <tip atau error umum>
+> **Catatan:** <hal yang belum diuji / batasan>
+## Masalah Umum                      (optional table: | Masalah | Solusi |)
 
-### <Tugas, mis. Menambah produk>
-1. Buka menu **Produk**.
-2. Klik **Tambah Produk**.
-   ![Form tambah produk](../../result/<run>/step-3.png)
-3. Isi **Nama** dan **Harga**, lalu klik **Simpan**.
-
-Hasil: muncul pesan "Produk berhasil disimpan".
-> Catatan: <tip atau error umum dan cara mengatasinya>
-
-## N. Pertanyaan Umum / Masalah Umum (optional)
-
-## Lampiran: Dokumentasi Pengujian
+# Dokumentasi Pengujian              -> III.
+<Kapan, di environment apa, dengan akun/data uji apa.>
 | Fitur | Alur | Status (Terverifikasi / Gagal / Belum diuji) | Tanggal | Folder hasil |
 ```
-Use relative image paths (`img/...`) so the manual moves with the repo. Add one line under the title: "Angka merah pada gambar menunjukkan nomor langkah di teks." Use English headings if the manual is in English.
+Use relative image paths (`img/...`). Use English headings if the manual is in English.
 
 ## PDF
-If the user wants a PDF, run `node skills/qa-manual/scripts/md2pdf.cjs qa/<feature>/manual.md qa/<feature>/manual-<feature>.pdf`. It produces an A4 PDF with embedded images, one main section per page, and page numbers. Check a few pages (`pdftoppm -r 60`) before handing it over.
+```
+node skills/qa-manual/scripts/md2pdf.cjs qa/<feature>/manual.md qa/<feature>/manual-<feature>.pdf --template "<path to the template .docx>"
+```
+The script reproduces the template: A4 with 1" margins, Tahoma 11pt justified text, a cover (title, subtitle, logo, company, year), a DAFTAR ISI with page numbers, Heading 1 "I./II." (each starts on a new page), Heading 2 "1.", Heading 3 "a.", and the template's list indents. The cover logo and the Tahoma fonts are read from the template `.docx` (`--template` or env `QA_MANUAL_TEMPLATE`). Ask the user for the template path if you do not have it, and never copy the fonts or logo into the repo. Look at every page (`pdftoppm -r 40` contact sheet) before handing the PDF over.
 
 ## Rules
 - Document only what you saw on screen. Do not invent menus, labels or messages; if unsure, check with `qa_snapshot`.
 - Check screenshots and text for secrets, tokens or personal data before sharing.
-- If the user wants to share it, offer to publish it as a doc or page, or export to PDF/Word; do not publish without being asked.
-- Finish with the manual path, the features covered, and any feature that could not be documented and why.
+- If the user wants to share it, offer to publish it as a doc or page, or send the PDF; do not publish without being asked.
+- Finish with the PDF path, the features covered, and any feature that could not be documented and why.

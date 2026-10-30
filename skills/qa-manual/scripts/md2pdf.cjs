@@ -61,9 +61,11 @@ const headings = []; // { level, label, text, id }
 let h = [0, 0, 0];
 let html = '';
 let list = null; // stack of open list tags
+let olCount = 0; // items in the current top-level numbered list
+let resume = 0; // continue numbering after an image that interrupted a list
 let table = false;
 let level = 0; // current heading level, for paragraph indentation
-const closeLists = () => { while (list && list.length) html += `</${list.pop()}>`; list = null; };
+const closeLists = () => { while (list && list.length) html += `</${list.pop()}>`; list = null; resume = 0; };
 const closeTable = () => { if (table) { html += '</tbody></table>'; table = false; } };
 
 const lines = src.split('\n');
@@ -71,7 +73,12 @@ for (const line of lines) {
   let m;
   if (!line.startsWith('|')) closeTable();
   const isItem = /^\s*(\d+\.|-) /.test(line);
-  if (!isItem && line.trim() !== '' && !/^!\[/.test(line)) closeLists();
+  if (!isItem && line.trim() !== '') {
+    const img = /^!\[/.test(line);
+    const keep = img && (list ? list[0] === 'ol' : resume) ? (list ? olCount : resume) : 0;
+    closeLists();
+    resume = keep; // a numbered list interrupted by an image picks up where it stopped
+  }
   if ((m = line.match(/^(#{1,3}) (.*)/))) {
     closeLists();
     const lv = m[1].length;
@@ -90,7 +97,13 @@ for (const line of lines) {
     if (!list) list = [];
     while (list.length > depth + 1) html += `</${list.pop()}>`;
     if (list.length === depth + 1 && list[depth] !== tag) html += `</${list.pop()}>`;
-    if (list.length < depth + 1) { html += `<${tag} class="d${depth}">`; list.push(tag); }
+    if (list.length < depth + 1) {
+      if (depth === 0) { olCount = tag === 'ol' ? resume : 0; }
+      html += `<${tag} class="d${depth}"${depth === 0 && tag === 'ol' && resume ? ` start="${resume + 1}"` : ''}>`;
+      list.push(tag);
+      resume = 0;
+    }
+    if (depth === 0 && tag === 'ol') olCount++;
     html += `<li>${inline(m[3])}</li>`;
   } else if ((m = line.match(/^> (.*)/))) {
     html += `<p class="note l${level}">${inline(m[1])}</p>`;
@@ -139,6 +152,7 @@ p { margin: 14pt 0 4pt; text-align: justify; }
 p.l1 { text-indent: 0.5in; }
 p.l2, p.l3 { margin-left: 0.5in; text-indent: 0.5in; }
 p.note { text-indent: 0; margin-left: 0.5in; }
+p:has(+ ul), p:has(+ ol), p:has(+ table) { break-after: avoid; }
 ol, ul { margin: 0 0 4pt; padding-left: 1in; }
 ol.d1, ul.d1 { padding-left: 0.5in; }
 li { margin-top: 14pt; padding-left: 0.08in; text-align: justify; }
