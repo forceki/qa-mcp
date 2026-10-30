@@ -1,6 +1,6 @@
 ---
 name: qa-manual
-description: "Write a user manual (buku manual / panduan pengguna) for a web app or feature: what each feature does and short step-by-step instructions with screenshots, captured with the qa-agent tools or taken from existing result/ folders. Also serves as test documentation (which flows were walked and when). Use when the user asks for a user manual, user guide, manual book, how-to guide, panduan, dokumentasi fitur, or to document how a feature works. Writes qa/<feature>/manual.md."
+description: "Write a user manual (buku manual / panduan pengguna) for a web app or feature: what each feature does and short step-by-step instructions with screenshots, captured with the qa-agent tools and annotated with numbered red boxes, with optional PDF export. Also serves as test documentation (which flows were walked and when). Use when the user asks for a user manual, user guide, manual book, how-to guide, panduan, dokumentasi fitur, or to document how a feature works. Writes qa/<feature>/manual.md."
 ---
 
 # User manual
@@ -19,6 +19,13 @@ For each feature not already covered by a passing run:
 3. Note on the way: required fields, the success message, and one or two common errors the user may hit.
 4. If a step fails, do not document it as working. Mark the section "Belum dapat didokumentasikan" / "Could not be documented", note the error, and suggest `qa-report` or `qa-explore`.
 5. `qa_finish_session`; keep the result folder path.
+
+## Annotate the screenshots
+Users follow pictures faster than text, so mark each picture: a red box around the element and a badge with the step number from the text (letters A, B, C for "what you see here" callouts).
+1. Write `qa/<feature>/capture.cjs` that uses `skills/qa-manual/scripts/annotate.cjs` (`launch`, `frameWith`, `labelBox`, `menu`, `shot`). See `qa/permohonan/capture.cjs` for an example. Log in with the saved state (`~/.qa-agent/states/<name>.json`) and write the images to `qa/<feature>/img/`.
+2. Recreate the screens you already walked. Fill forms but **do not submit** unless the user agrees, so capturing creates no extra data. Mark only steps whose result you saw in the qa-agent run.
+3. Number the badges to match the step numbers in the text exactly. Keep boxes from overlapping: use separate boxes with the same number instead of one huge box.
+4. Look at every image before using it. Re-shoot it if a loader, an open dropdown, a cut-off box or the wrong value shows.
 
 ## Keep it short
 - One feature = one section. 3-8 steps per task. If it needs more, split into two tasks.
@@ -54,7 +61,10 @@ Hasil: muncul pesan "Produk berhasil disimpan".
 ## Lampiran: Dokumentasi Pengujian
 | Fitur | Alur | Status (Terverifikasi / Gagal / Belum diuji) | Tanggal | Folder hasil |
 ```
-Use relative image paths so the manual moves with the repo. Use English headings if the manual is in English.
+Use relative image paths (`img/...`) so the manual moves with the repo. Add one line under the title: "Angka merah pada gambar menunjukkan nomor langkah di teks." Use English headings if the manual is in English.
+
+## PDF
+If the user wants a PDF, run `node skills/qa-manual/scripts/md2pdf.cjs qa/<feature>/manual.md qa/<feature>/manual-<feature>.pdf`. It produces an A4 PDF with embedded images, one main section per page, and page numbers. Check a few pages (`pdftoppm -r 60`) before handing it over.
 
 ## Rules
 - Document only what you saw on screen. Do not invent menus, labels or messages; if unsure, check with `qa_snapshot`.

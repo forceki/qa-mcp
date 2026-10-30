@@ -4,3 +4,4 @@ result/
 *.log
 .DS_Store
 dist-test/
+qa/
