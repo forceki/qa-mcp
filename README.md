@@ -105,7 +105,7 @@ Or in `~/.gemini/settings.json`:
 }
 ```
 
-The `qa_*` tools work the same in every client. The `skills/` folder is a Claude Code feature. In other agents, paste or reference the `SKILL.md` files from `AGENTS.md` (Codex, Cursor) or `GEMINI.md` (Gemini CLI) to get the same analyze, test-cases, run, explore and report workflow. Only Claude Code has been tested so far.
+The `qa_*` tools work the same in every client. The `skills/` folder is a Claude Code feature. In other agents, paste or reference the `SKILL.md` files from `AGENTS.md` (Codex, Cursor) or `GEMINI.md` (Gemini CLI) to get the same analyze, test-cases, run, explore, report and manual workflow. Only Claude Code has been tested so far.
 
 ## Basic auth + login pages (dev/staging sites)
 
@@ -233,7 +233,7 @@ Example prompts: "test the create-user API, show full request and response in th
 
 ## QA skills (analysis, test cases, running, reporting)
 
-Besides the MCP tools, `skills/` has five Claude Code skills that guide the whole QA loop: `qa-analyze`, `qa-test-cases`, `qa-run`, `qa-explore` and `qa-report`. See [skills/README.md](skills/README.md).
+Besides the MCP tools, `skills/` has six Claude Code skills that guide the whole QA loop: `qa-analyze`, `qa-test-cases`, `qa-run`, `qa-explore`, `qa-report` and `qa-manual`. See [skills/README.md](skills/README.md).
 
 ```bash
 npm run install:skills      # links them into ~/.claude/skills, then restart Claude Code
